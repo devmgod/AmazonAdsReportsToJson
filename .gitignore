@@ -14,6 +14,8 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+package-lock.json
+
 # ===============================
 # Build output
 # ===============================
