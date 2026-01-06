@@ -516,15 +516,42 @@ async function autoCreateAmazonAdsReport() {
         "timeUnit": "DAILY",
         "format": "GZIP_JSON",
         "columns": [
+          "date",
           "campaignId",
           "campaignName",
           "campaignStatus",
+          "campaignBudgetAmount",
+          "campaignBudgetCurrencyCode",
+          "campaignBudgetType",
+          "campaignBiddingStrategy",
           "impressions",
           "clicks",
           "cost",
+          "costPerClick",
+          "clickThroughRate",
+          "sales1d",
+          "sales7d",
           "sales14d",
+          "sales30d",
+          "purchases1d",
+          "purchases7d",
+          "purchases14d",
+          "purchases30d",
+          "unitsSoldClicks1d",
+          "unitsSoldClicks7d",
+          "unitsSoldClicks14d",
+          "unitsSoldClicks30d",
+          "unitsSoldSameSku1d",
+          "unitsSoldSameSku7d",
+          "unitsSoldSameSku14d",
+          "unitsSoldSameSku30d",
+          "attributedSalesSameSku1d",
+          "attributedSalesSameSku7d",
+          "attributedSalesSameSku14d",
+          "attributedSalesSameSku30d",
           "acosClicks14d",
           "roasClicks14d",
+          "topOfSearchImpressionShare"
         ]
       }
     };
@@ -567,15 +594,42 @@ app.get("/amazon-ads/reports", async (req, res) => {
         "timeUnit": "DAILY",
         "format": "GZIP_JSON",
         "columns": [
+          "date",
           "campaignId",
           "campaignName",
           "campaignStatus",
+          "campaignBudgetAmount",
+          "campaignBudgetCurrencyCode",
+          "campaignBudgetType",
+          "campaignBiddingStrategy",
           "impressions",
           "clicks",
           "cost",
+          "costPerClick",
+          "clickThroughRate",
+          "sales1d",
+          "sales7d",
           "sales14d",
+          "sales30d",
+          "purchases1d",
+          "purchases7d",
+          "purchases14d",
+          "purchases30d",
+          "unitsSoldClicks1d",
+          "unitsSoldClicks7d",
+          "unitsSoldClicks14d",
+          "unitsSoldClicks30d",
+          "unitsSoldSameSku1d",
+          "unitsSoldSameSku7d",
+          "unitsSoldSameSku14d",
+          "unitsSoldSameSku30d",
+          "attributedSalesSameSku1d",
+          "attributedSalesSameSku7d",
+          "attributedSalesSameSku14d",
+          "attributedSalesSameSku30d",
           "acosClicks14d",
           "roasClicks14d",
+          "topOfSearchImpressionShare"
         ]
       }
     };
@@ -598,7 +652,7 @@ app.get("/amazon-ads/reports", async (req, res) => {
 app.get("/amazon-ads/reports/single", async (req, res) => {
   try {
     // Use reportId from path parameter or fallback to globalState
-    const reportId = globalState.reportId || "ec48c701-c924-487d-9885-530e038249ef";
+    const reportId = globalState.reportId || "6649bbff-aeff-4791-9816-144fe39b903e";
     
     if (!reportId) {
       return res.status(400).json({ error: "Report ID is required. Please provide reportId in the URL or create a report first." });
@@ -663,27 +717,48 @@ async function fetchAmazonAdsReportSummary() {
   const rows = Array.isArray(data) ? data : data.rows || [];
 
   // Aggregate metrics
-  const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
-  const totalSales = rows.reduce((s, r) => s + (r.sales14d || 0), 0);
-  const totalImpressions = rows.reduce((s, r) => s + (r.impressions || 0), 0);
-  const totalClicks = rows.reduce((s, r) => s + (r.clicks || 0), 0);
+  const summary = rows.reduce((acc, row) => {
+    acc.impressions += row.impressions || 0;
+    acc.clicks += row.clicks || 0;
+    acc.cost += row.cost || 0;
+    acc.sales14d += row.sales14d || 0;
+    acc.purchases14d += row.purchases14d || 0;
+    return acc;
+  }, {
+    impressions: 0,
+    clicks: 0,
+    cost: 0,
+    sales14d: 0,
+    purchases14d: 0
+  });
 
-  const summary = {
-    totalCampaigns: new Set(rows.map((r) => r.campaignId)).size,
-    activeCampaigns: new Set(
-      rows
-        .filter((r) => r.campaignStatus === "ENABLED")
-        .map((r) => r.campaignId)
-    ).size,
-    impressions: totalImpressions,
-    clicks: totalClicks,
-    spend: totalCost,
-    sales: totalSales,
-    acos: totalSales > 0 ? totalCost / totalSales : 0,
-    roas: totalCost > 0 ? totalSales / totalCost : 0,
-  };
+  summary.ctr = summary.impressions > 0
+    ? (summary.clicks / summary.impressions) * 100
+    : 0;
 
-  return summary;
+  summary.cpc = summary.clicks > 0
+    ? summary.cost / summary.clicks
+    : 0;
+
+  summary.acos = summary.sales14d > 0
+    ? (summary.cost / summary.sales14d) * 100
+    : null;
+
+  summary.roas = summary.cost > 0
+    ? summary.sales14d / summary.cost
+    : null;
+
+  summary.shopping = rows.reduce((sum, r) => sum + (r.purchases14d || 0), 0);
+
+  // Add campaign counts
+  summary.totalCampaigns = new Set(rows.map((r) => r.campaignId)).size;
+  summary.activeCampaigns = new Set(
+    rows
+      .filter((r) => r.campaignStatus === "ENABLED")
+      .map((r) => r.campaignId)
+  ).size;
+
+  return {summary, data};
 }
 
 /**
@@ -692,8 +767,8 @@ async function fetchAmazonAdsReportSummary() {
  */
 app.get("/amazon-ads/report-json", async (req, res) => {
   try {
-    const summary = await fetchAmazonAdsReportSummary();
-    return res.json(summary);
+    const {summary, data} = await fetchAmazonAdsReportSummary();
+    return res.json({summary, data});
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Server error" });
   }
