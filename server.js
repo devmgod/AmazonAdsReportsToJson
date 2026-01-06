@@ -722,6 +722,7 @@ async function fetchAmazonAdsReportSummary() {
     acc.clicks += row.clicks || 0;
     acc.cost += row.cost || 0;
     acc.sales14d += row.sales14d || 0;
+    acc.sales30d += row.sales30d || 0;
     acc.purchases14d += row.purchases14d || 0;
     return acc;
   }, {
@@ -729,6 +730,7 @@ async function fetchAmazonAdsReportSummary() {
     clicks: 0,
     cost: 0,
     sales14d: 0,
+    sales30d: 0,
     purchases14d: 0
   });
 
@@ -740,9 +742,25 @@ async function fetchAmazonAdsReportSummary() {
     ? summary.cost / summary.clicks
     : 0;
 
-  summary.acos = summary.sales14d > 0
-    ? (summary.cost / summary.sales14d) * 100
+  const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
+  const adRevenue = rows.reduce((s, r) => s + (r.sales14d || 0), 0);
+  
+  const acos = adRevenue > 0
+    ? (totalCost / adRevenue) * 100
     : null;
+  
+  summary.acos = Number(acos?.toFixed(2));
+
+  // TACOS calculation (totalRevenue should come from Seller Central / SP-API)
+  const tacosTotalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
+  // TODO: Get totalRevenue from Seller Central / SP-API (marketplaceTotalRevenue)
+  const totalRevenue = null; // This must come from Seller Central / SP-API
+  
+  const tacos = totalRevenue > 0
+    ? (tacosTotalCost / totalRevenue) * 100
+    : null;
+  
+  summary.tacos = Number(tacos?.toFixed(2));
 
   summary.roas = summary.cost > 0
     ? summary.sales14d / summary.cost
