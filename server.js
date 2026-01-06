@@ -749,6 +749,7 @@ async function fetchAmazonAdsReportSummary() {
     : null;
 
   summary.shopping = rows.reduce((sum, r) => sum + (r.purchases14d || 0), 0);
+  summary.totalSpend = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
 
   // Add campaign counts
   summary.totalCampaigns = new Set(rows.map((r) => r.campaignId)).size;
