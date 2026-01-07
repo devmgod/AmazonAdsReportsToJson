@@ -574,12 +574,22 @@ async function autoCreateAmazonAdsReport() {
  */
 app.get("/amazon-ads/reports", async (req, res) => {
   try {
-    // Calculate default dates: endDate = today, startDate = 30 days before
+    // Calculate dates based on period query parameter or defaults
     const today = new Date();
     const endDateDefault = today.toISOString().split('T')[0]; // Format: YYYY-MM-DD
     
+    // Determine number of days based on period query parameter
+    // Default to 30 days if period is not provided or not recognized
+    let daysBack = 30;
+    if (req.query.period === "7d") {
+      daysBack = 7;
+    } else if (req.query.period === "30d") {
+      daysBack = 30;
+    }
+    // If period is not provided or doesn't match "7d" or "30d", daysBack remains 30 (default)
+    
     const startDateDefault = new Date(today);
-    startDateDefault.setDate(today.getDate() - 30);
+    startDateDefault.setDate(today.getDate() - daysBack);
     const startDateDefaultFormatted = startDateDefault.toISOString().split('T')[0]; // Format: YYYY-MM-DD
 
     // Build report body with query parameters or defaults
@@ -664,6 +674,43 @@ app.get("/amazon-ads/reports/single", async (req, res) => {
     return res.status(500).json({ error: e?.message || "Server error" });
   }
 });
+
+/**
+ * Helper function to calculate total revenue from Amazon SP-API orders
+ * Returns an object with currency and totalRevenue
+ * @param {number} daysBack - Number of days to look back for orders (default: 30)
+ */
+async function calculateTotalRevenueFromOrders(daysBack = 30) {
+  try {
+    // Calculate date range
+    const today = new Date();
+    const startDate = new Date(today);
+    startDate.setDate(today.getDate() - daysBack);
+    
+    // Fetch orders from SP-API
+    const orders = await fetchAmazonSPAPIOrders({
+      CreatedAfter: startDate.toISOString(),
+    }, 'na');
+    
+    const ordersList = orders.payload?.Orders || orders.Orders || [];
+    
+    const totalRevenue = ordersList
+      .filter(o => o.OrderStatus !== "Canceled" && o.OrderTotal?.Amount)
+      .reduce((sum, o) => sum + Number(o.OrderTotal.Amount), 0);
+    
+    return {
+      currency: ordersList[0]?.OrderTotal?.CurrencyCode ?? "BRL",
+      totalRevenue
+    };
+  } catch (error) {
+    console.error(`[Total Revenue] Failed to calculate total revenue from orders: ${error.message}`);
+    // Return default values if unable to fetch orders (TACOS will be null)
+    return {
+      currency: "BRL",
+      totalRevenue: 0
+    };
+  }
+}
 
 /**
  * Helper function to fetch and process Amazon Ads report JSON
@@ -751,16 +798,18 @@ async function fetchAmazonAdsReportSummary() {
   
   summary.acos = Number(acos?.toFixed(2));
 
-  // TACOS calculation (totalRevenue should come from Seller Central / SP-API)
+  // TACOS calculation (totalRevenue from Seller Central / SP-API)
   const tacosTotalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
-  // TODO: Get totalRevenue from Seller Central / SP-API (marketplaceTotalRevenue)
-  const totalRevenue = null; // This must come from Seller Central / SP-API
+  // Get totalRevenue from Seller Central / SP-API orders
+  const revenueData = await calculateTotalRevenueFromOrders(30); // Use 30 days to match default report period
+  const totalRevenue = revenueData.totalRevenue;
   
   const tacos = totalRevenue > 0
     ? (tacosTotalCost / totalRevenue) * 100
     : null;
   
   summary.tacos = Number(tacos?.toFixed(2));
+  summary.revenueCurrency = revenueData.currency;
 
   summary.roas = summary.cost > 0
     ? summary.sales14d / summary.cost
