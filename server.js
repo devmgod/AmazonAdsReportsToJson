@@ -662,7 +662,7 @@ app.get("/amazon-ads/reports", async (req, res) => {
 app.get("/amazon-ads/reports/single", async (req, res) => {
   try {
     // Use reportId from path parameter or fallback to globalState
-    const reportId = globalState.reportId || "b5cf8251-f11e-45b1-8c11-f618a6b118f8";
+    const reportId = globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263";
     
     if (!reportId) {
       return res.status(400).json({ error: "Report ID is required. Please provide reportId in the URL or create a report first." });
@@ -910,7 +910,7 @@ app.get("/api/all-data", async (req, res) => {
             }
           : null,
         profileId: globalState.profileId,
-        reportId: globalState.reportId || "ec48c701-c924-487d-9885-530e038249ef",
+        reportId: globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263",
         url: globalState.url,
       },
       campaigns: campaignsData || null,
@@ -992,7 +992,7 @@ app.listen(port, async () => {
       // Fetch report and save URL after profiles are fetched
       try {
         // Use the same default reportId as the /amazon-ads/reports/single endpoint
-        const reportId = globalState.reportId || "b5cf8251-f11e-45b1-8c11-f618a6b118f8";
+        const reportId = globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263";
         globalState.reportId = reportId;
 
         const reportData = await getAmazonAdsReport(reportId);
