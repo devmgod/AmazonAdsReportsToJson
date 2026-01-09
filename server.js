@@ -780,10 +780,13 @@ async function fetchAmazonAdsReportSummary() {
   // TACOS = Ad Spend ÷ Total Revenue × 100
   const totalRevenue = globalState.revenue || 0;
   const tacos = totalRevenue > 0
-    ? (totalCost / totalRevenue) * 100
+    ? (totalCost / (totalRevenue + adRevenue)) * 100
     : null;
   
   summary.tacos = Number(tacos?.toFixed(2));
+  summary.totalCost = totalCost;
+  summary.totalRevenue = totalRevenue;
+  summary.adRevenue = adRevenue;
 
   summary.roas = summary.cost > 0
     ? summary.sales14d / summary.cost
