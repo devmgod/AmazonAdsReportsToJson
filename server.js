@@ -677,7 +677,7 @@ app.get("/amazon-ads/reports", async (req, res) => {
 app.get("/amazon-ads/reports/single", async (req, res) => {
   try {
     // Use reportId from path parameter or fallback to globalState
-    const reportId = globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263";
+    const reportId = globalState.reportId || "10e62211-a1cc-4206-9eba-0aea71f4657b";
     
     if (!reportId) {
       return res.status(400).json({ error: "Report ID is required. Please provide reportId in the URL or create a report first." });
@@ -769,6 +769,9 @@ async function fetchAmazonAdsReportSummary() {
 
   const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
   const adRevenue = rows.reduce((s, r) => s + (r.sales14d || 0), 0);
+  const adRevenue30d = rows.reduce((s, r) => s + (r.sales30d || 0), 0);
+  const adRevenue1d = rows.reduce((s, r) => s + (r.sales1d || 0), 0);
+  const adRevenue7d = rows.reduce((s, r) => s + (r.sales7d || 0), 0);
   
   const acos = adRevenue > 0
     ? (totalCost / adRevenue) * 100
@@ -780,7 +783,7 @@ async function fetchAmazonAdsReportSummary() {
   // TACOS = Ad Spend ÷ Total Revenue × 100
   const totalRevenue = globalState.revenue || 0;
   const tacos = totalRevenue > 0
-    ? (totalCost / (totalRevenue + adRevenue)) * 100
+    ? (totalCost / (adRevenue + adRevenue30d)) * 100
     : null;
   
   summary.tacos = Number(tacos?.toFixed(2));
@@ -896,7 +899,7 @@ app.get("/api/all-data", async (req, res) => {
             }
           : null,
         profileId: globalState.profileId,
-        reportId: globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263",
+        reportId: globalState.reportId || "10e62211-a1cc-4206-9eba-0aea71f4657b",
         url: globalState.url,
         revenue: globalState.revenue,
       },
@@ -992,7 +995,7 @@ app.listen(port, async () => {
         // Use the same default reportId as the /amazon-ads/reports/single endpoint
         const reportId = globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263";
         globalState.reportId = reportId;
-
+        
         const reportData = await getAmazonAdsReport(reportId);
         console.log(`✓ Amazon Ads report fetched successfully. ReportId: ${reportId} Revenue: ${globalState.revenue}`);
         if (globalState.url) {
