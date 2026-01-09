@@ -993,7 +993,7 @@ app.listen(port, async () => {
       // Fetch report and save URL after profiles are fetched
       try {
         // Use the same default reportId as the /amazon-ads/reports/single endpoint
-        const reportId = globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263";
+        const reportId = globalState.reportId || "10e62211-a1cc-4206-9eba-0aea71f4657b";
         globalState.reportId = reportId;
         
         const reportData = await getAmazonAdsReport(reportId);
