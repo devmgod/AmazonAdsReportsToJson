@@ -27,6 +27,7 @@ const globalState = {
   profileId: null,
   reportId: null,
   url: null,
+  revenue: null,
 };
 
 /**
@@ -368,6 +369,20 @@ async function fetchAmazonSPAPIOrders(queryParams = {}, region = 'na') {
     throw new Error(data.message || data.errors?.[0]?.message || data.error || "Failed to fetch orders");
   }
 
+  // Calculate total order revenue from orders
+  if (data.payload && data.payload.Orders && Array.isArray(data.payload.Orders)) {
+    const totalRevenue = data.payload.Orders.reduce((sum, order) => {
+      // OrderTotal structure: { Amount: string, CurrencyCode: string }
+      const orderTotal = order.OrderTotal?.Amount || 0;
+      const amount = typeof orderTotal === 'string' ? parseFloat(orderTotal) : (orderTotal || 0);
+      return sum + (isNaN(amount) ? 0 : amount);
+    }, 0);
+    
+    globalState.revenue = totalRevenue;
+  } else {
+    globalState.revenue = 0;
+  }
+
   return data;
 }
 
@@ -676,43 +691,6 @@ app.get("/amazon-ads/reports/single", async (req, res) => {
 });
 
 /**
- * Helper function to calculate total revenue from Amazon SP-API orders
- * Returns an object with currency and totalRevenue
- * @param {number} daysBack - Number of days to look back for orders (default: 30)
- */
-async function calculateTotalRevenueFromOrders(daysBack = 30) {
-  try {
-    // Calculate date range
-    const today = new Date();
-    const startDate = new Date(today);
-    startDate.setDate(today.getDate() - daysBack);
-    
-    // Fetch orders from SP-API
-    const orders = await fetchAmazonSPAPIOrders({
-      CreatedAfter: startDate.toISOString(),
-    }, 'na');
-    
-    const ordersList = orders.payload?.Orders || orders.Orders || [];
-    
-    const totalRevenue = ordersList
-      .filter(o => o.OrderStatus !== "Canceled" && o.OrderTotal?.Amount)
-      .reduce((sum, o) => sum + Number(o.OrderTotal.Amount), 0);
-    
-    return {
-      currency: ordersList[0]?.OrderTotal?.CurrencyCode ?? "BRL",
-      totalRevenue
-    };
-  } catch (error) {
-    console.error(`[Total Revenue] Failed to calculate total revenue from orders: ${error.message}`);
-    // Return default values if unable to fetch orders (TACOS will be null)
-    return {
-      currency: "BRL",
-      totalRevenue: 0
-    };
-  }
-}
-
-/**
  * Helper function to fetch and process Amazon Ads report JSON
  * Returns the summary data or throws an error
  */
@@ -798,18 +776,14 @@ async function fetchAmazonAdsReportSummary() {
   
   summary.acos = Number(acos?.toFixed(2));
 
-  // TACOS calculation (totalRevenue from Seller Central / SP-API)
-  const tacosTotalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
-  // Get totalRevenue from Seller Central / SP-API orders
-  const revenueData = await calculateTotalRevenueFromOrders(30); // Use 30 days to match default report period
-  const totalRevenue = revenueData.totalRevenue;
-  
+  // Calculate TACOS (Total Advertising Cost of Sales)
+  // TACOS = Ad Spend ÷ Total Revenue × 100
+  const totalRevenue = globalState.revenue || 0;
   const tacos = totalRevenue > 0
-    ? (tacosTotalCost / totalRevenue) * 100
+    ? (totalCost / totalRevenue) * 100
     : null;
   
   summary.tacos = Number(tacos?.toFixed(2));
-  summary.revenueCurrency = revenueData.currency;
 
   summary.roas = summary.cost > 0
     ? summary.sales14d / summary.cost
@@ -912,6 +886,7 @@ app.get("/api/all-data", async (req, res) => {
         profileId: globalState.profileId,
         reportId: globalState.reportId || "d173e91c-b689-4f96-85f2-7d2e2cf4a263",
         url: globalState.url,
+        revenue: globalState.revenue,
       },
       campaigns: campaignsData || null,
       campaignsError: campaignsError || null,
@@ -976,6 +951,17 @@ app.listen(port, async () => {
   try {
     await refreshAmazonLwaToken();
     console.log("✓ Amazon LWA token refreshed successfully");
+    
+    // Fetch orders and calculate revenue after token is refreshed
+    try {
+      const ordersData = await fetchAmazonSPAPIOrders({}, 'na');
+      console.log(`✓ Amazon SP-API orders fetched successfully. Revenue: ${globalState.revenue || 0}`);
+      if (ordersData.payload && ordersData.payload.Orders) {
+        console.log(`  Total orders: ${ordersData.payload.Orders.length}`);
+      }
+    } catch (error) {
+      console.error("✗ Failed to fetch Amazon SP-API orders:", error.message);
+    }
   } catch (error) {
     console.error("✗ Failed to refresh Amazon LWA token:", error.message);
   }
@@ -996,7 +982,7 @@ app.listen(port, async () => {
         globalState.reportId = reportId;
 
         const reportData = await getAmazonAdsReport(reportId);
-        console.log(`✓ Amazon Ads report fetched successfully. ReportId: ${reportId}`);
+        console.log(`✓ Amazon Ads report fetched successfully. ReportId: ${reportId} Revenue: ${globalState.revenue}`);
         if (globalState.url) {
           console.log(`  Report URL saved to globalState`);
         }
