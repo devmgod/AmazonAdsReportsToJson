@@ -788,6 +788,15 @@ async function fetchAmazonAdsReportSummary() {
   summary.totalRevenue = totalRevenue;
   summary.adRevenue = adRevenue;
 
+  // Extract startDate and endDate from report data
+  const dates = rows
+    .map(row => row.date)
+    .filter(date => date != null)
+    .sort();
+  
+  summary.startDate = dates.length > 0 ? dates[0] : null;
+  summary.endDate = dates.length > 0 ? dates[dates.length - 1] : null;
+
   summary.roas = summary.cost > 0
     ? summary.sales14d / summary.cost
     : null;
