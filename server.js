@@ -677,7 +677,7 @@ app.get("/amazon-ads/reports", async (req, res) => {
 app.get("/amazon-ads/reports/single", async (req, res) => {
   try {
     // Use reportId from path parameter or fallback to globalState
-    const reportId = globalState.reportId || "10e62211-a1cc-4206-9eba-0aea71f4657b";
+    const reportId = globalState.reportId;
     
     if (!reportId) {
       return res.status(400).json({ error: "Report ID is required. Please provide reportId in the URL or create a report first." });
@@ -899,7 +899,7 @@ app.get("/api/all-data", async (req, res) => {
             }
           : null,
         profileId: globalState.profileId,
-        reportId: globalState.reportId || "10e62211-a1cc-4206-9eba-0aea71f4657b",
+        reportId: globalState.reportId,
         url: globalState.url,
         revenue: globalState.revenue,
       },
@@ -956,6 +956,32 @@ app.get("/api/all-data", async (req, res) => {
   }
 });
 
+/**
+ * GET /amazon-ads/reports/test-cron
+ * Manually trigger the automatic report creation (for testing cron functionality)
+ * returns: Report creation response with reportId and status
+ */
+app.get("/amazon-ads/reports/test-cron", async (req, res) => {
+  try {
+    console.log(`[Test Cron] Manual trigger of autoCreateAmazonAdsReport at ${new Date().toISOString()}`);
+    const data = await autoCreateAmazonAdsReport();
+    return res.json({
+      success: true,
+      message: "Report created successfully via manual trigger",
+      data: data,
+      reportId: globalState.reportId,
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    console.error(`[Test Cron] Error in manual trigger:`, e.message);
+    return res.status(500).json({ 
+      success: false,
+      error: e?.message || "Server error",
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, async () => {
   console.log(`API listening on :${port}`);
@@ -993,10 +1019,10 @@ app.listen(port, async () => {
       // Fetch report and save URL after profiles are fetched
       try {
         // Use the same default reportId as the /amazon-ads/reports/single endpoint
-        const reportId = globalState.reportId || "10e62211-a1cc-4206-9eba-0aea71f4657b";
+        const reportId = globalState.reportId;
         globalState.reportId = reportId;
         
-        const reportData = await getAmazonAdsReport(reportId);
+        const reportData = await autoCreateAmazonAdsReport();
         console.log(`✓ Amazon Ads report fetched successfully. ReportId: ${reportId} Revenue: ${globalState.revenue}`);
         if (globalState.url) {
           console.log(`  Report URL saved to globalState`);
@@ -1017,22 +1043,85 @@ app.listen(port, async () => {
   // "0 2 * * *" = every day at 2 AM (default: Brazilian time)
   // "0 0 * * *" = every day at midnight
   // "0 0 * * 1" = every Monday at midnight
+  // "* * * * *" = every minute (for testing only)
   const cronSchedule = process.env.REPORT_CRON_SCHEDULE || "0 2 * * *"; // Default: daily at 2 AM Brazilian time
   const cronTimezone = process.env.REPORT_CRON_TIMEZONE || "America/Sao_Paulo"; // Brazilian timezone
   
-  cron.schedule(cronSchedule, async () => {
-    console.log(`[Cron] Scheduled report creation triggered at ${new Date().toISOString()}`);
+  // Validate cron expression
+  if (!cron.validate(cronSchedule)) {
+    console.error(`✗ Invalid cron expression: ${cronSchedule}`);
+    console.error(`  Cron expression must be in format: "minute hour day-of-month month day-of-week"`);
+    console.error(`  Example: "0 2 * * *" (runs daily at 2 AM)`);
+    console.error(`  Current expression is invalid and cron job will NOT be scheduled`);
+  } else {
     try {
-      await autoCreateAmazonAdsReport();
+      // Create a flag to prevent overlapping executions
+      let isRunning = false;
+      
+      // Validate timezone by attempting to use it
+      let timezoneToUse = cronTimezone;
+      try {
+        // Test if timezone is valid by creating a date in that timezone
+        const testDate = new Date().toLocaleString('en-US', { timeZone: cronTimezone });
+        if (!testDate || testDate === 'Invalid Date') {
+          throw new Error(`Invalid timezone: ${cronTimezone}`);
+        }
+      } catch (tzError) {
+        console.warn(`⚠ Invalid timezone "${cronTimezone}", falling back to UTC`);
+        timezoneToUse = "UTC";
+      }
+      
+      // Create the cron job with error handling
+      let cronJob;
+      try {
+        cronJob = cron.schedule(cronSchedule, async () => {
+          if (isRunning) {
+            console.log(`[Cron] Previous job still running, skipping this execution at ${new Date().toISOString()}`);
+            return;
+          }
+          
+          isRunning = true;
+          const triggerTime = new Date().toISOString();
+          console.log(`[Cron] Scheduled report creation triggered at ${triggerTime} (timezone: ${timezoneToUse})`);
+          
+          try {
+            await autoCreateAmazonAdsReport();
+            console.log(`[Cron] Scheduled report creation completed successfully at ${new Date().toISOString()}`);
+          } catch (error) {
+            console.error(`[Cron] Error in scheduled report creation:`, error.message);
+            console.error(`[Cron] Full error:`, error);
+          } finally {
+            isRunning = false;
+          }
+        }, {
+          scheduled: true,
+          timezone: timezoneToUse
+        });
+        
+        // Verify the job was created successfully
+        if (cronJob) {
+          console.log(`✓ Daily cron job scheduled successfully`);
+          console.log(`  Schedule: ${cronSchedule}`);
+          console.log(`  Timezone: ${timezoneToUse}${timezoneToUse !== cronTimezone ? ` (original: ${cronTimezone} was invalid)` : ''}`);
+          console.log(`  Next execution will be at the scheduled time in ${timezoneToUse}`);
+          console.log(`  Current time (local): ${new Date().toString()}`);
+          console.log(`  Current time (UTC): ${new Date().toUTCString()}`);
+          console.log(`  Current reportId in globalState: ${globalState.reportId || "None"}`);
+          console.log(`  Test the cron manually via: GET /amazon-ads/reports/test-cron`);
+        } else {
+          console.error(`✗ Failed to create cron job - cron.schedule() returned null/undefined`);
+        }
+      } catch (scheduleError) {
+        console.error(`✗ Error calling cron.schedule():`, scheduleError.message);
+        console.error(`  This might be due to an invalid cron expression or timezone`);
+        console.error(`  Cron expression: ${cronSchedule}`);
+        console.error(`  Timezone: ${timezoneToUse}`);
+        console.error(`  Full error:`, scheduleError);
+      }
     } catch (error) {
-      console.error(`[Cron] Error in scheduled report creation:`, error.message);
+      console.error(`✗ Error setting up cron job:`, error.message);
+      console.error(`  Stack trace:`, error.stack);
     }
-  }, {
-    scheduled: true,
-    timezone: cronTimezone
-  });
-  
-  console.log(`✓ Daily cron job scheduled. Report will be created automatically at: ${cronSchedule} (${cronTimezone})`);
-  console.log(`  Current reportId in globalState: ${globalState.reportId || "None"}`);
+  }
 });
 
