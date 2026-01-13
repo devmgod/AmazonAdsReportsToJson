@@ -2,7 +2,32 @@ import express from "express";
 import fetch from "node-fetch";
 import zlib from "zlib";
 import dotenv from "dotenv";
-import cron from "node-cron";
+import {
+  testDatabaseConnection,
+  initializeCampaignsTable,
+  storeCampaignsInDatabase,
+  getCampaignsFromDatabase,
+  initializeOrdersTable,
+  storeOrdersInDatabase,
+  getOrdersFromDatabase,
+  getDatabaseTestResult,
+  getDatabaseInfo,
+  initializeReportSingleTable,
+  storeReportSingleInDatabase,
+  initializeReportsTable,
+  storeReportsInDatabase,
+  getReportsFromDatabase,
+  initializeAIDecisionLogTable,
+  initializeAIDetectedChangesTable,
+  initializeRecommendedActionsTable,
+  storeAIDecision,
+  getAIDecisionLog,
+  storeAIDetectedChange,
+  getAIDetectedChanges,
+  storeRecommendedAction,
+  getRecommendedActions,
+  updateRecommendedActionStatus,
+} from "./database.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -25,7 +50,7 @@ const globalState = {
   amazonLwaToken: null,
   amazonAdsLwaToken: null,
   profileId: null,
-  reportId: null,
+  reportId: "a03197f6-6c3d-4216-981f-d390b518a94b",
   url: null,
   revenue: null,
 };
@@ -396,6 +421,30 @@ app.use((req, res, next) => {
 });
 
 /**
+ * GET /db/test
+ * Tests PostgreSQL database connection
+ * returns: Connection status and database info
+ */
+app.get("/db/test", async (req, res) => {
+  try {
+    const result = await getDatabaseTestResult();
+    if (result.success) {
+      return res.json(result);
+    } else {
+      return res.status(500).json(result);
+    }
+  } catch (e) {
+    const dbInfo = getDatabaseInfo();
+    return res.status(500).json({ 
+      success: false,
+      error: e?.message || "Database connection error",
+      database: dbInfo.database,
+      host: dbInfo.host,
+    });
+  }
+});
+
+/**
  * GET /amazon-lwa/token
  * Uses environment variables: AMAZON_REFRESH_TOKEN, AMAZON_CLIENT_ID, AMAZON_CLIENT_SECRET
  * query params: ?refresh_token=<token> (optional, defaults to AMAZON_REFRESH_TOKEN env var)
@@ -442,15 +491,199 @@ app.get("/amazon-ads/profiles", async (req, res) => {
 
 /**
  * GET /amazon-ads/campaigns
- * Gets Amazon Ads campaigns
+ * Gets Amazon Ads campaigns and stores them in the database
  * Uses access token from global state (amazonAdsLwaToken), profileId, and ADS_CLIENT_ID from environment
  * Query parameters: Any valid Amazon Advertising API query parameters (e.g., startIndex, count, etc.)
- * returns: Array of campaign objects
+ * returns: Array of campaign objects and storage status
  */
 app.get("/amazon-ads/campaigns", async (req, res) => {
   try {
     const data = await fetchAmazonAdsCampaigns(req.query);
-    return res.json(data);
+    
+    // Store campaigns in database if data is an array
+    let storageResult = null;
+    if (Array.isArray(data)) {
+      try {
+        storageResult = await storeCampaignsInDatabase(data);
+      } catch (storageError) {
+        console.error("Failed to store campaigns:", storageError.message);
+        // Continue even if storage fails, return the data anyway
+      }
+    }
+    
+    // Return campaigns data along with storage status
+    return res.json({
+      campaigns: data,
+      storage: storageResult || { message: "No campaigns to store or storage failed" }
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /db/campaigns
+ * Retrieves campaigns from the database
+ * Query parameters:
+ *   - state: Filter by campaign state (e.g., "archived", "enabled")
+ *   - campaignType: Filter by campaign type (e.g., "sponsoredProducts")
+ *   - limit: Limit number of results (default: 100). Use "all" or "0" to fetch all records
+ *   - offset: Offset for pagination (default: 0)
+ * returns: Array of campaign objects from database with totalCount metadata
+ */
+app.get("/db/campaigns", async (req, res) => {
+  try {
+    const result = await getCampaignsFromDatabase({
+      state: req.query.state,
+      campaignType: req.query.campaignType,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /db/orders
+ * Retrieves orders from the database
+ * Query parameters:
+ *   - orderStatus: Filter by order status (e.g., "Unshipped", "Shipped")
+ *   - marketplaceId: Filter by marketplace ID
+ *   - fulfillmentChannel: Filter by fulfillment channel (e.g., "MFN", "AFN")
+ *   - startDate: Filter orders from this date (ISO 8601 format)
+ *   - endDate: Filter orders until this date (ISO 8601 format)
+ *   - limit: Limit number of results (default: 100). Use "all" or "0" to fetch all records
+ *   - offset: Offset for pagination (default: 0)
+ * returns: Array of order objects from database with totalCount metadata
+ */
+app.get("/db/orders", async (req, res) => {
+  try {
+    const result = await getOrdersFromDatabase({
+      orderStatus: req.query.orderStatus,
+      marketplaceId: req.query.marketplaceId,
+      fulfillmentChannel: req.query.fulfillmentChannel,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /db/reports
+ * Retrieves reports from the database
+ * Query parameters:
+ *   - reportId: Filter by report ID
+ *   - campaignId: Filter by campaign ID
+ *   - campaignStatus: Filter by campaign status (e.g., "ENABLED", "PAUSED")
+ *   - startDate: Filter reports from this date (ISO 8601 format)
+ *   - endDate: Filter reports until this date (ISO 8601 format)
+ *   - limit: Limit number of results (default: 100). Use "all" or "0" to fetch all records
+ *   - offset: Offset for pagination (default: 0)
+ * returns: Array of report objects from database with totalCount metadata
+ */
+app.get("/db/reports", async (req, res) => {
+  try {
+    const result = await getReportsFromDatabase({
+      reportId: req.query.reportId,
+      campaignId: req.query.campaignId,
+      campaignStatus: req.query.campaignStatus,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /db/reports/summary
+ * Retrieves summary data from reports table
+ * Query parameters:
+ *   - reportId: Filter by report ID
+ *   - campaignId: Filter by campaign ID
+ *   - campaignStatus: Filter by campaign status (e.g., "ENABLED", "PAUSED")
+ *   - startDate: Filter reports from this date (ISO 8601 format)
+ *   - endDate: Filter reports until this date (ISO 8601 format)
+ *   - limit: Limit number of results for calculation (default: "all"). Use "all" or "0" to fetch all records
+ * returns: Summary object with aggregated metrics (impressions, clicks, cost, sales, acos, roas, etc.)
+ */
+app.get("/db/reports/summary", async (req, res) => {
+  try {
+    // Get reports from database - use "all" by default to calculate summary from all matching records
+    const result = await getReportsFromDatabase({
+      reportId: req.query.reportId,
+      campaignId: req.query.campaignId,
+      campaignStatus: req.query.campaignStatus,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      limit: req.query.limit || "all", // Default to "all" for summary calculation
+      offset: 0, // Always start from beginning for summary
+    });
+
+    // Transform database rows to match format expected by calculateReportSummary
+    // Ensure all numeric fields are properly converted and dates are formatted correctly
+    const rows = result.reports.map(report => {
+      // Convert date to string format (YYYY-MM-DD)
+      let dateValue = report.date;
+      if (dateValue instanceof Date) {
+        dateValue = dateValue.toISOString().split('T')[0];
+      } else if (dateValue && typeof dateValue === 'string') {
+        // Remove time portion if present
+        dateValue = dateValue.split('T')[0];
+      } else if (!dateValue) {
+        dateValue = null;
+      }
+      
+      // Helper function to safely convert numeric values
+      const toNumber = (value) => {
+        if (value === null || value === undefined) return 0;
+        const num = typeof value === 'number' ? value : parseFloat(value);
+        return isNaN(num) ? 0 : num;
+      };
+      
+      return {
+        date: dateValue,
+        impressions: toNumber(report.impressions),
+        clicks: toNumber(report.clicks),
+        cost: toNumber(report.cost),
+        sales1d: toNumber(report.sales1d),
+        sales7d: toNumber(report.sales7d),
+        sales14d: toNumber(report.sales14d),
+        sales30d: toNumber(report.sales30d),
+        purchases14d: toNumber(report.purchases14d),
+        campaignId: report.campaignId || null,
+        campaignStatus: report.campaignStatus || null,
+      };
+    });
+
+    // Calculate summary using the existing function
+    const summary = calculateReportSummary(rows);
+
+    // Return summary with metadata
+    return res.json({
+      summary,
+      metadata: {
+        totalReports: result.totalCount,
+        reportsUsed: rows.length,
+        filters: {
+          reportId: req.query.reportId || null,
+          campaignId: req.query.campaignId || null,
+          campaignStatus: req.query.campaignStatus || null,
+          startDate: req.query.startDate || null,
+          endDate: req.query.endDate || null,
+        }
+      }
+    });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Server error" });
   }
@@ -458,7 +691,7 @@ app.get("/amazon-ads/campaigns", async (req, res) => {
 
 /**
  * GET /amazon-sp-api/orders
- * Gets Amazon Selling Partner API orders
+ * Gets Amazon Selling Partner API orders and stores them in the database
  * Uses access token from global state (amazonLwaToken)
  * Query parameters:
  *   - MarketplaceIds: Optional. Comma-separated list or array of marketplace IDs (e.g., "A2Q3Y263D00KWC")
@@ -478,107 +711,33 @@ app.get("/amazon-ads/campaigns", async (req, res) => {
  *   - NextToken: Optional. Token for pagination
  *   - AmazonOrderIds: Optional. Array of Amazon order IDs
  *   - region: Optional. API region (na, eu, fe). Defaults to 'na'
- * returns: Orders response with payload containing orders array
+ * returns: Orders response with payload containing orders array and storage status
  */
 app.get("/amazon-sp-api/orders", async (req, res) => {
   try {
     const { region, ...queryParams } = req.query;
     const data = await fetchAmazonSPAPIOrders(queryParams, region || 'na');
-    return res.json(data);
+    
+    // Store orders in database if orders array exists
+    let storageResult = null;
+    if (data.payload && data.payload.Orders && Array.isArray(data.payload.Orders)) {
+      try {
+        storageResult = await storeOrdersInDatabase(data.payload.Orders);
+      } catch (storageError) {
+        console.error("Failed to store orders:", storageError.message);
+        // Continue even if storage fails, return the data anyway
+      }
+    }
+    
+    // Return orders data along with storage status
+    return res.json({
+      ...data,
+      storage: storageResult || { message: "No orders to store or storage failed" }
+    });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Server error" });
   }
 });
-
-/**
- * Helper function to automatically create Amazon Ads report
- * Ensures tokens and profileId are available, then creates report
- * Stores reportId in globalState
- */
-async function autoCreateAmazonAdsReport() {
-  try {
-    console.log("[Auto Report] Starting automatic report creation...");
-    
-    // Ensure Amazon Ads LWA token is available
-    if (!globalState.amazonAdsLwaToken || !globalState.amazonAdsLwaToken.access_token) {
-      console.log("[Auto Report] Refreshing Amazon Ads LWA token...");
-      await refreshAmazonAdsLwaToken();
-    }
-    
-    // Ensure profileId is available
-    if (!globalState.profileId) {
-      console.log("[Auto Report] Fetching Amazon Ads profiles...");
-      await fetchAmazonAdsProfiles();
-    }
-    
-    // Calculate default dates: endDate = today, startDate = 30 days before
-    const today = new Date();
-    const endDateDefault = today.toISOString().split('T')[0]; // Format: YYYY-MM-DD
-    
-    const startDateDefault = new Date(today);
-    startDateDefault.setDate(today.getDate() - 30);
-    const startDateDefaultFormatted = startDateDefault.toISOString().split('T')[0]; // Format: YYYY-MM-DD
-
-    // Build report body with defaults
-    const reportBody = {
-      "name": "sp-dashboard-daily",
-      "startDate": startDateDefaultFormatted,
-      "endDate": endDateDefault,
-      "configuration": {
-        "adProduct": "SPONSORED_PRODUCTS",
-        "groupBy": ["campaign"],
-        "reportTypeId": "spCampaigns",
-        "timeUnit": "DAILY",
-        "format": "GZIP_JSON",
-        "columns": [
-          "date",
-          "campaignId",
-          "campaignName",
-          "campaignStatus",
-          "campaignBudgetAmount",
-          "campaignBudgetCurrencyCode",
-          "campaignBudgetType",
-          "campaignBiddingStrategy",
-          "impressions",
-          "clicks",
-          "cost",
-          "costPerClick",
-          "clickThroughRate",
-          "sales1d",
-          "sales7d",
-          "sales14d",
-          "sales30d",
-          "purchases1d",
-          "purchases7d",
-          "purchases14d",
-          "purchases30d",
-          "unitsSoldClicks1d",
-          "unitsSoldClicks7d",
-          "unitsSoldClicks14d",
-          "unitsSoldClicks30d",
-          "unitsSoldSameSku1d",
-          "unitsSoldSameSku7d",
-          "unitsSoldSameSku14d",
-          "unitsSoldSameSku30d",
-          "attributedSalesSameSku1d",
-          "attributedSalesSameSku7d",
-          "attributedSalesSameSku14d",
-          "attributedSalesSameSku30d",
-          "acosClicks14d",
-          "roasClicks14d",
-          "topOfSearchImpressionShare"
-        ]
-      }
-    };
-
-    const data = await createAmazonAdsReport(reportBody);
-    console.log(`[Auto Report] Report created successfully. ReportId: ${globalState.reportId}`);
-    return data;
-  } catch (e) {
-    console.error(`[Auto Report] Failed to create report: ${e?.message || "Unknown error"}`);
-    throw e;
-  }
-}
 
 /**
  * GET /amazon-ads/reports
@@ -684,11 +843,455 @@ app.get("/amazon-ads/reports/single", async (req, res) => {
     }
     
     const data = await getAmazonAdsReport(reportId);
-    return res.json(data);
+    
+    // Store report data in database
+    let storageResult = null;
+    try {
+      storageResult = await storeReportSingleInDatabase(data);
+    } catch (storageError) {
+      console.error("Failed to store report_single:", storageError.message);
+      // Continue even if storage fails, return the data anyway
+    }
+    
+    // Return report data along with storage status
+    return res.json({
+      ...data,
+      storage: storageResult || { message: "Storage failed" }
+    });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Server error" });
   }
 });
+
+/**
+ * Helper function to update Amazon Ads campaign
+ * Updates campaign budget or bidding strategy
+ */
+async function updateAmazonAdsCampaign(campaignId, updates) {
+  if (!globalState.amazonAdsLwaToken || !globalState.amazonAdsLwaToken.access_token) {
+    throw new Error("Access token not available. Please call /amazon-ads/lwa-token first.");
+  }
+
+  if (!adsClientId) {
+    throw new Error("Missing ADS_CLIENT_ID environment variable");
+  }
+
+  if (!globalState.profileId) {
+    throw new Error("Profile ID not available. Please call /amazon-ads/profiles first.");
+  }
+
+  const accessToken = globalState.amazonAdsLwaToken.access_token;
+  const profileId = globalState.profileId;
+
+  // Build update payload
+  const updatePayload = {
+    campaignId: campaignId.toString(),
+    ...updates
+  };
+
+  const response = await fetch(`https://advertising-api.amazon.com/v2/campaigns`, {
+    method: "PUT",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Amazon-Advertising-API-ClientId": adsClientId,
+      "Amazon-Advertising-API-Scope": profileId.toString(),
+      "Content-Type": "application/vnd.updatecampaignsrequest.v3+json",
+      "Accept": "application/vnd.updatecampaignsresponse.v3+json",
+    },
+    body: JSON.stringify([updatePayload]),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.message || data.error || "Failed to update campaign");
+  }
+
+  return data;
+}
+
+/**
+ * AI Decision Engine
+ * Analyzes campaign performance and generates recommendations
+ */
+async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytical') {
+  const analysis = {
+    detectedChanges: [],
+    recommendedActions: [],
+    optimizationMetrics: {
+      campaignsOptimized: 0
+    }
+  };
+
+  // Group reports by campaign
+  const reportsByCampaign = {};
+  reports.forEach(report => {
+    if (!reportsByCampaign[report.campaignId]) {
+      reportsByCampaign[report.campaignId] = [];
+    }
+    reportsByCampaign[report.campaignId].push(report);
+  });
+
+  // Analyze each campaign
+  for (const campaign of campaigns) {
+    if (campaign.state !== 'enabled' && campaign.state !== 'ENABLED') continue;
+
+    const campaignReports = reportsByCampaign[campaign.campaignId] || [];
+    if (campaignReports.length === 0) continue;
+
+    // Calculate campaign metrics
+    const totalCost = campaignReports.reduce((sum, r) => sum + (parseFloat(r.cost) || 0), 0);
+    const totalSales = campaignReports.reduce((sum, r) => sum + (parseFloat(r.sales14d) || 0), 0);
+    const totalClicks = campaignReports.reduce((sum, r) => sum + (parseInt(r.clicks) || 0), 0);
+    const totalImpressions = campaignReports.reduce((sum, r) => sum + (parseInt(r.impressions) || 0), 0);
+
+    const roas = totalCost > 0 ? totalSales / totalCost : 0;
+    const acos = totalSales > 0 ? (totalCost / totalSales) * 100 : 0;
+    const ctr = totalImpressions > 0 ? (totalClicks / totalImpressions) * 100 : 0;
+    const cpc = totalClicks > 0 ? totalCost / totalClicks : 0;
+    const dailyBudget = parseFloat(campaign.dailyBudget) || 0;
+
+    // Decision logic based on performance
+    let confidence = 'medium';
+    let detectedChange = null;
+    let recommendedAction = null;
+
+    // High ROAS (>3.0) - Increase budget
+    if (roas > 3.0 && campaignReports.length >= 7) {
+      confidence = 'high';
+      const suggestedIncrease = Math.min(dailyBudget * 0.2, 50); // Max 20% or R$50
+      
+      detectedChange = {
+        date: new Date(),
+        description: `High ROAS detected: Campaign "${campaign.name}" shows ${roas.toFixed(2)}x ROAS`,
+        details: `Campaign demonstrates consistently high return. Current daily budget: R$ ${dailyBudget.toFixed(2)}. Recommend increasing by R$ ${suggestedIncrease.toFixed(2)}.`,
+        confidence: 'high',
+        campaignId: campaign.campaignId,
+        patternType: 'high_roas'
+      };
+
+      if (aiMode === 'execution') {
+        recommendedAction = {
+          type: 'Budget Adjustment',
+          title: `Increase daily budget for Campaign ${campaign.name}`,
+          description: `Increase daily budget from R$ ${dailyBudget.toFixed(2)} to R$ ${(dailyBudget + suggestedIncrease).toFixed(2)} based on high ROAS performance (${roas.toFixed(2)}x)`,
+          campaignId: campaign.campaignId,
+          campaignName: campaign.name,
+          scheduledTime: '3:00 AM',
+          status: 'pending',
+          actionData: {
+            action: 'update_budget',
+            campaignId: campaign.campaignId,
+            oldBudget: dailyBudget,
+            newBudget: dailyBudget + suggestedIncrease
+          }
+        };
+      }
+    }
+    // Low ROAS (<1.5) and high ACOS (>50%) - Decrease budget or pause
+    else if (roas < 1.5 && acos > 50 && campaignReports.length >= 7) {
+      confidence = 'high';
+      const suggestedDecrease = Math.max(dailyBudget * 0.2, 10); // Min 20% or R$10
+      
+      detectedChange = {
+        date: new Date(),
+        description: `Low ROAS and high ACOS: Campaign "${campaign.name}" shows ${roas.toFixed(2)}x ROAS and ${acos.toFixed(2)}% ACOS`,
+        details: `Campaign performance is below target. Current daily budget: R$ ${dailyBudget.toFixed(2)}. Recommend decreasing by R$ ${suggestedDecrease.toFixed(2)} or pausing.`,
+        confidence: 'high',
+        campaignId: campaign.campaignId,
+        patternType: 'low_performance'
+      };
+
+      if (aiMode === 'execution' && dailyBudget > 20) {
+        recommendedAction = {
+          type: 'Budget Adjustment',
+          title: `Decrease daily budget for Campaign ${campaign.name}`,
+          description: `Decrease daily budget from R$ ${dailyBudget.toFixed(2)} to R$ ${(dailyBudget - suggestedDecrease).toFixed(2)} due to low ROAS (${roas.toFixed(2)}x)`,
+          campaignId: campaign.campaignId,
+          campaignName: campaign.name,
+          scheduledTime: '3:00 AM',
+          status: 'pending',
+          actionData: {
+            action: 'update_budget',
+            campaignId: campaign.campaignId,
+            oldBudget: dailyBudget,
+            newBudget: Math.max(dailyBudget - suggestedDecrease, 10)
+          }
+        };
+      }
+    }
+    // High CTR (>2%) but low conversions - Optimize bids
+    else if (ctr > 2 && roas < 2 && campaignReports.length >= 14) {
+      confidence = 'medium';
+      const currentBid = campaign.bidding?.strategy || cpc;
+      const suggestedBid = currentBid * 0.9; // Reduce by 10%
+      
+      detectedChange = {
+        date: new Date(),
+        description: `High CTR but low conversions: Campaign "${campaign.name}" has ${ctr.toFixed(2)}% CTR but ${roas.toFixed(2)}x ROAS`,
+        details: `Campaign gets clicks but conversions are low. Current CPC: R$ ${cpc.toFixed(2)}. Recommend reducing bid by 10% to improve efficiency.`,
+        confidence: 'medium',
+        campaignId: campaign.campaignId,
+        patternType: 'ctr_conversion_mismatch'
+      };
+
+      if (aiMode === 'execution') {
+        recommendedAction = {
+          type: 'Bid Adjustment',
+          title: `Optimize bid for Campaign ${campaign.name}`,
+          description: `Reduce bid by 10% to improve conversion efficiency. Current CPC: R$ ${cpc.toFixed(2)}`,
+          campaignId: campaign.campaignId,
+          campaignName: campaign.name,
+          scheduledTime: '3:00 AM',
+          status: 'pending',
+          actionData: {
+            action: 'update_bid',
+            campaignId: campaign.campaignId,
+            oldBid: currentBid,
+            newBid: suggestedBid
+          }
+        };
+      }
+    }
+
+    // Store detected changes
+    if (detectedChange) {
+      try {
+        await storeAIDetectedChange(detectedChange);
+        analysis.detectedChanges.push(detectedChange);
+      } catch (error) {
+        console.error(`Failed to store detected change for campaign ${campaign.campaignId}:`, error.message);
+      }
+    }
+
+    // Store recommended actions
+    if (recommendedAction) {
+      try {
+        await storeRecommendedAction(recommendedAction);
+        analysis.recommendedActions.push(recommendedAction);
+        analysis.optimizationMetrics.campaignsOptimized++;
+      } catch (error) {
+        console.error(`Failed to store recommended action for campaign ${campaign.campaignId}:`, error.message);
+      }
+    }
+  }
+
+  return analysis;
+}
+
+/**
+ * Execute recommended actions
+ * This function should be called at 3:00 AM daily
+ */
+async function executeRecommendedActions() {
+  try {
+    // Get all pending actions
+    const pendingActions = await getRecommendedActions({ status: 'pending', limit: 'all' });
+    
+    const results = [];
+    
+    for (const action of pendingActions) {
+      try {
+        const actionData = action.actionData || {};
+        
+        if (actionData.action === 'update_budget') {
+          // Update campaign budget
+          await updateAmazonAdsCampaign(actionData.campaignId, {
+            dailyBudget: {
+              amount: actionData.newBudget,
+              currencyCode: 'BRL'
+            }
+          });
+
+          // Log the decision
+          await storeAIDecision({
+            timestamp: new Date(),
+            campaignId: actionData.campaignId,
+            campaignName: action.campaignName,
+            actionType: 'Budget Update',
+            whatChanged: `Daily budget changed from R$ ${actionData.oldBudget.toFixed(2)} to R$ ${actionData.newBudget.toFixed(2)}`,
+            reason: action.description,
+            status: 'success',
+            oldValue: { budget: actionData.oldBudget },
+            newValue: { budget: actionData.newBudget },
+            confidence: 'high',
+            aiMode: 'execution'
+          });
+
+          // Update action status
+          await updateRecommendedActionStatus(action.id, 'executed', new Date());
+          
+          results.push({
+            actionId: action.id,
+            status: 'success',
+            message: `Budget updated successfully for campaign ${actionData.campaignId}`
+          });
+        } else if (actionData.action === 'update_bid') {
+          // Note: Bid updates require updating ad groups or keywords, which is more complex
+          // For now, we'll log it as a recommendation that needs manual implementation
+          await storeAIDecision({
+            timestamp: new Date(),
+            campaignId: actionData.campaignId,
+            campaignName: action.campaignName,
+            actionType: 'Bid Adjustment',
+            whatChanged: `Bid adjustment recommended: ${actionData.oldBid.toFixed(2)} to ${actionData.newBid.toFixed(2)}`,
+            reason: action.description,
+            status: 'pending_manual',
+            oldValue: { bid: actionData.oldBid },
+            newValue: { bid: actionData.newBid },
+            confidence: 'medium',
+            aiMode: 'execution'
+          });
+
+          await updateRecommendedActionStatus(action.id, 'requires_manual', new Date());
+          
+          results.push({
+            actionId: action.id,
+            status: 'requires_manual',
+            message: `Bid adjustment requires manual implementation for campaign ${actionData.campaignId}`
+          });
+        }
+      } catch (error) {
+        // Log failed action
+        await storeAIDecision({
+          timestamp: new Date(),
+          campaignId: action.campaignId,
+          campaignName: action.campaignName,
+          actionType: action.type,
+          whatChanged: action.title,
+          reason: `Failed to execute: ${error.message}`,
+          status: 'failed',
+          oldValue: {},
+          newValue: {},
+          confidence: 'high',
+          aiMode: 'execution'
+        });
+
+        await updateRecommendedActionStatus(action.id, 'failed', new Date());
+        
+        results.push({
+          actionId: action.id,
+          status: 'failed',
+          message: error.message
+        });
+      }
+    }
+
+    return {
+      executed: results.filter(r => r.status === 'success').length,
+      failed: results.filter(r => r.status === 'failed').length,
+      requiresManual: results.filter(r => r.status === 'requires_manual').length,
+      results
+    };
+  } catch (error) {
+    console.error('Error executing recommended actions:', error);
+    throw error;
+  }
+}
+
+/**
+ * Helper function to calculate summary metrics from report rows
+ * @param {Array} rows - Array of report row objects
+ * @returns {Object} Summary object with aggregated metrics
+ */
+function calculateReportSummary(rows) {
+  // Aggregate metrics
+  const summary = rows.reduce((acc, row) => {
+    acc.impressions += row.impressions || 0;
+    acc.clicks += row.clicks || 0;
+    acc.cost += row.cost || 0;
+    acc.sales14d += row.sales14d || 0;
+    acc.sales30d += row.sales30d || 0;
+    acc.purchases14d += row.purchases14d || 0;
+    return acc;
+  }, {
+    impressions: 0,
+    clicks: 0,
+    cost: 0,
+    sales14d: 0,
+    sales30d: 0,
+    purchases14d: 0
+  });
+
+  summary.ctr = summary.impressions > 0
+    ? summary.clicks / summary.impressions
+    : 0;
+
+  summary.cpc = summary.clicks > 0
+    ? summary.cost / summary.clicks
+    : 0;
+
+  const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
+  const adRevenue = rows.reduce((s, r) => s + (r.sales14d || 0), 0);
+  const adRevenue30d = rows.reduce((s, r) => s + (r.sales30d || 0), 0);
+  const adRevenue1d = rows.reduce((s, r) => s + (r.sales1d || 0), 0);
+  const adRevenue7d = rows.reduce((s, r) => s + (r.sales7d || 0), 0);
+  
+  const acos = adRevenue > 0
+    ? (totalCost / adRevenue) * 100
+    : null;
+  
+  summary.acos = Number(acos?.toFixed(2));
+
+  // Calculate TACOS (Total Advertising Cost of Sales)
+  // TACOS = Ad Spend ÷ Total Revenue × 100
+  const totalRevenue = globalState.revenue || 0;
+  const tacos = totalRevenue > 0
+    ? (totalCost / (adRevenue + adRevenue30d)) * 100
+    : null;
+  
+  summary.tacos = Number(tacos?.toFixed(2));
+  summary.totalCost = totalCost;
+  summary.totalRevenue = totalRevenue;
+  summary.adRevenue = adRevenue;
+
+  // Extract startDate and endDate from report data
+  // Convert dates to YYYY-MM-DD string format
+  const dates = rows
+    .map(row => {
+      if (!row.date) return null;
+      // If it's already a string in YYYY-MM-DD format, use it
+      if (typeof row.date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(row.date)) {
+        return row.date.split('T')[0]; // Take only the date part if it includes time
+      }
+      // If it's a Date object, convert to YYYY-MM-DD
+      if (row.date instanceof Date) {
+        return row.date.toISOString().split('T')[0];
+      }
+      // Try to parse as date and convert
+      try {
+        const date = new Date(row.date);
+        if (!isNaN(date.getTime())) {
+          return date.toISOString().split('T')[0];
+        }
+      } catch (e) {
+        // Ignore parsing errors
+      }
+      return null;
+    })
+    .filter(date => date != null)
+    .sort();
+  
+  summary.startDate = dates.length > 0 ? dates[0] : null;
+  summary.endDate = dates.length > 0 ? dates[dates.length - 1] : null;
+
+  summary.roas = summary.cost > 0
+    ? summary.sales14d / summary.cost
+    : null;
+
+  summary.shopping = rows.reduce((sum, r) => sum + (r.purchases14d || 0), 0);
+  summary.totalSpend = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
+
+  // Add campaign counts
+  summary.totalCampaigns = new Set(rows.map((r) => r.campaignId)).size;
+  summary.activeCampaigns = new Set(
+    rows
+      .filter((r) => r.campaignStatus === "ENABLED")
+      .map((r) => r.campaignId)
+  ).size;
+
+  return summary;
+}
 
 /**
  * Helper function to fetch and process Amazon Ads report JSON
@@ -737,83 +1340,23 @@ async function fetchAmazonAdsReportSummary() {
 
   // Parse
   const data = JSON.parse(jsonText);
-
+  
   // Ensure we have an array of rows
   const rows = Array.isArray(data) ? data : data.rows || [];
 
-  // Aggregate metrics
-  const summary = rows.reduce((acc, row) => {
-    acc.impressions += row.impressions || 0;
-    acc.clicks += row.clicks || 0;
-    acc.cost += row.cost || 0;
-    acc.sales14d += row.sales14d || 0;
-    acc.sales30d += row.sales30d || 0;
-    acc.purchases14d += row.purchases14d || 0;
-    return acc;
-  }, {
-    impressions: 0,
-    clicks: 0,
-    cost: 0,
-    sales14d: 0,
-    sales30d: 0,
-    purchases14d: 0
-  });
+  // Store report rows in database
+  const reportId = globalState.reportId;
+  if (reportId && rows.length > 0) {
+    try {
+      await storeReportsInDatabase(reportId, rows);
+    } catch (storageError) {
+      console.error("Failed to store report rows:", storageError.message);
+      // Continue even if storage fails
+    }
+  }
 
-  summary.ctr = summary.impressions > 0
-    ? (summary.clicks / summary.impressions) * 100
-    : 0;
-
-  summary.cpc = summary.clicks > 0
-    ? summary.cost / summary.clicks
-    : 0;
-
-  const totalCost = rows.reduce((s, r) => s + (r.cost || 0), 0);
-  const adRevenue = rows.reduce((s, r) => s + (r.sales14d || 0), 0);
-  const adRevenue30d = rows.reduce((s, r) => s + (r.sales30d || 0), 0);
-  const adRevenue1d = rows.reduce((s, r) => s + (r.sales1d || 0), 0);
-  const adRevenue7d = rows.reduce((s, r) => s + (r.sales7d || 0), 0);
-  
-  const acos = adRevenue > 0
-    ? (totalCost / adRevenue) * 100
-    : null;
-  
-  summary.acos = Number(acos?.toFixed(2));
-
-  // Calculate TACOS (Total Advertising Cost of Sales)
-  // TACOS = Ad Spend ÷ Total Revenue × 100
-  const totalRevenue = globalState.revenue || 0;
-  const tacos = totalRevenue > 0
-    ? (totalCost / (adRevenue + adRevenue30d)) * 100
-    : null;
-  
-  summary.tacos = Number(tacos?.toFixed(2));
-  summary.totalCost = totalCost;
-  summary.totalRevenue = totalRevenue;
-  summary.adRevenue = adRevenue;
-
-  // Extract startDate and endDate from report data
-  const dates = rows
-    .map(row => row.date)
-    .filter(date => date != null)
-    .sort();
-  
-  summary.startDate = dates.length > 0 ? dates[0] : null;
-  summary.endDate = dates.length > 0 ? dates[dates.length - 1] : null;
-
-  summary.roas = summary.cost > 0
-    ? summary.sales14d / summary.cost
-    : null;
-
-  summary.shopping = rows.reduce((sum, r) => sum + (r.purchases14d || 0), 0);
-  summary.totalSpend = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
-
-  // Add campaign counts
-  summary.totalCampaigns = new Set(rows.map((r) => r.campaignId)).size;
-  summary.activeCampaigns = new Set(
-    rows
-      .filter((r) => r.campaignStatus === "ENABLED")
-      .map((r) => r.campaignId)
-  ).size;
+  // Calculate summary using separate function
+  const summary = calculateReportSummary(rows);
 
   return {summary, data};
 }
@@ -843,10 +1386,21 @@ app.get("/api/all-data", async (req, res) => {
     // Fetch campaigns data if tokens and profile are available
     let campaignsData = null;
     let campaignsError = null;
+    let campaignsStorageResult = null;
     
     try {
       if (globalState.amazonAdsLwaToken?.access_token && globalState.profileId) {
         campaignsData = await fetchAmazonAdsCampaigns(req.query);
+        
+        // Store campaigns in database if data is an array
+        if (Array.isArray(campaignsData)) {
+          try {
+            campaignsStorageResult = await storeCampaignsInDatabase(campaignsData);
+          } catch (storageError) {
+            console.error("Failed to store campaigns in /api/all-data:", storageError.message);
+            // Continue even if storage fails
+          }
+        }
       }
     } catch (error) {
       campaignsError = error.message || "Failed to fetch campaigns";
@@ -855,12 +1409,23 @@ app.get("/api/all-data", async (req, res) => {
     // Fetch orders data if LWA token is available
     let ordersData = null;
     let ordersError = null;
+    let ordersStorageResult = null;
     
     try {
       if (globalState.amazonLwaToken?.access_token) {
         // Use query params for orders, but extract region if provided
         const { region, ...ordersQuery } = req.query;
         ordersData = await fetchAmazonSPAPIOrders(ordersQuery, region || 'na');
+        
+        // Store orders in database if orders array exists
+        if (ordersData.payload && ordersData.payload.Orders && Array.isArray(ordersData.payload.Orders)) {
+          try {
+            ordersStorageResult = await storeOrdersInDatabase(ordersData.payload.Orders);
+          } catch (storageError) {
+            console.error("Failed to store orders in /api/all-data:", storageError.message);
+            // Continue even if storage fails
+          }
+        }
       }
     } catch (error) {
       ordersError = error.message || "Failed to fetch orders";
@@ -905,8 +1470,10 @@ app.get("/api/all-data", async (req, res) => {
       },
       campaigns: campaignsData || null,
       campaignsError: campaignsError || null,
+      campaignsStorage: campaignsStorageResult || null,
       orders: ordersData || null,
       ordersError: ordersError || null,
+      ordersStorage: ordersStorageResult || null,
       reportSummary: reportSummary || null,
       reportSummaryError: reportSummaryError || null,
       tokenStatus: {
@@ -938,6 +1505,10 @@ app.get("/api/all-data", async (req, res) => {
         // Don't expose actual credentials for security
       },
       availableEndpoints: [
+        "GET /db/test",
+        "GET /db/campaigns",
+        "GET /db/orders",
+        "GET /db/reports",
         "GET /amazon-lwa/token",
         "GET /amazon-ads/lwa-token",
         "GET /amazon-ads/profiles",
@@ -957,34 +1528,235 @@ app.get("/api/all-data", async (req, res) => {
 });
 
 /**
- * GET /amazon-ads/reports/test-cron
- * Manually trigger the automatic report creation (for testing cron functionality)
- * returns: Report creation response with reportId and status
+ * POST /ai/analyze
+ * Analyzes campaign performance and generates AI recommendations
+ * Query parameters:
+ *   - aiMode: 'analytical' or 'execution' (default: 'analytical')
  */
-app.get("/amazon-ads/reports/test-cron", async (req, res) => {
+app.post("/ai/analyze", async (req, res) => {
   try {
-    console.log(`[Test Cron] Manual trigger of autoCreateAmazonAdsReport at ${new Date().toISOString()}`);
-    const data = await autoCreateAmazonAdsReport();
+    const aiMode = req.query.aiMode || req.body.aiMode || 'analytical';
+    
+    // Get campaigns and reports from database
+    const campaignsResult = await getCampaignsFromDatabase({ limit: 'all' });
+    const reportsResult = await getReportsFromDatabase({ limit: 'all' });
+    
+    const campaigns = campaignsResult.campaigns || [];
+    const reports = reportsResult.reports || [];
+    
+    // Run AI analysis
+    const analysis = await analyzeCampaignPerformance(campaigns, reports, aiMode);
+    
     return res.json({
       success: true,
-      message: "Report created successfully via manual trigger",
-      data: data,
-      reportId: globalState.reportId,
-      timestamp: new Date().toISOString()
+      aiMode,
+      analysis,
+      metadata: {
+        campaignsAnalyzed: campaigns.length,
+        reportsAnalyzed: reports.length,
+        timestamp: new Date()
+      }
     });
   } catch (e) {
-    console.error(`[Test Cron] Error in manual trigger:`, e.message);
-    return res.status(500).json({ 
-      success: false,
-      error: e?.message || "Server error",
-      timestamp: new Date().toISOString()
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /ai/detected-changes
+ * Retrieves AI-detected changes from database
+ * Query parameters:
+ *   - confidence: Filter by confidence level ('high', 'medium', 'low', 'all')
+ *   - campaignId: Filter by campaign ID
+ *   - limit: Limit number of results
+ */
+app.get("/ai/detected-changes", async (req, res) => {
+  try {
+    const changes = await getAIDetectedChanges({
+      confidence: req.query.confidence || 'all',
+      campaignId: req.query.campaignId,
+      limit: req.query.limit || 100
     });
+    return res.json({ changes, count: changes.length });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /ai/recommended-actions
+ * Retrieves recommended actions from database
+ * Query parameters:
+ *   - status: Filter by status ('pending', 'executed', 'failed')
+ *   - limit: Limit number of results
+ */
+app.get("/ai/recommended-actions", async (req, res) => {
+  try {
+    const actions = await getRecommendedActions({
+      status: req.query.status,
+      limit: req.query.limit || 100
+    });
+    return res.json({ actions, count: actions.length });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /ai/decision-log
+ * Retrieves AI decision log from database
+ * Query parameters:
+ *   - campaignId: Filter by campaign ID
+ *   - startDate: Filter from date
+ *   - endDate: Filter to date
+ *   - status: Filter by status
+ *   - limit: Limit number of results
+ *   - offset: Offset for pagination
+ */
+app.get("/ai/decision-log", async (req, res) => {
+  try {
+    const result = await getAIDecisionLog({
+      campaignId: req.query.campaignId,
+      startDate: req.query.startDate,
+      endDate: req.query.endDate,
+      status: req.query.status,
+      limit: req.query.limit || 100,
+      offset: req.query.offset || 0
+    });
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/execute-actions
+ * Executes pending recommended actions
+ * This endpoint should be called at 3:00 AM daily (via cron job or scheduler)
+ */
+app.post("/ai/execute-actions", async (req, res) => {
+  try {
+    const result = await executeRecommendedActions();
+    return res.json({
+      success: true,
+      message: `Executed ${result.executed} actions, ${result.failed} failed, ${result.requiresManual} require manual intervention`,
+      ...result
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/update-campaign
+ * Manually update a campaign (budget or bid)
+ * Body: { campaignId, dailyBudget?, bidding? }
+ */
+app.post("/ai/update-campaign", async (req, res) => {
+  try {
+    const { campaignId, dailyBudget, bidding } = req.body;
+    
+    if (!campaignId) {
+      return res.status(400).json({ error: "campaignId is required" });
+    }
+
+    const updates = {};
+    if (dailyBudget !== undefined) {
+      updates.dailyBudget = {
+        amount: dailyBudget,
+        currencyCode: 'BRL'
+      };
+    }
+    if (bidding !== undefined) {
+      updates.bidding = bidding;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "At least one update field (dailyBudget or bidding) is required" });
+    }
+
+    // Get current campaign data for logging
+    const campaignsResult = await getCampaignsFromDatabase({ limit: 'all' });
+    const campaign = campaignsResult.campaigns.find(c => c.campaignId === campaignId);
+    
+    // Update campaign via Amazon Ads API
+    const result = await updateAmazonAdsCampaign(campaignId, updates);
+    
+    // Log the decision
+    await storeAIDecision({
+      timestamp: new Date(),
+      campaignId: campaignId,
+      campaignName: campaign?.name || null,
+      actionType: 'Manual Update',
+      whatChanged: JSON.stringify(updates),
+      reason: 'Manual campaign update via API',
+      status: 'success',
+      oldValue: campaign || {},
+      newValue: updates,
+      confidence: 'high',
+      aiMode: 'execution'
+    });
+    
+    return res.json({
+      success: true,
+      message: "Campaign updated successfully",
+      result
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /ai/optimization-metrics
+ * Get optimization metrics
+ */
+app.get("/ai/optimization-metrics", async (req, res) => {
+  try {
+    const campaignsResult = await getCampaignsFromDatabase({ limit: 'all' });
+    const campaigns = campaignsResult.campaigns || [];
+    const optimizedCampaigns = campaigns.filter(c => 
+      c.state === 'enabled' || c.state === 'ENABLED'
+    ).length;
+    
+    return res.json({
+      campaignsOptimized: optimizedCampaigns,
+      totalCampaigns: campaigns.length
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
   }
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, async () => {
   console.log(`API listening on :${port}`);
+  
+  // Test database connection on startup
+  console.log("Testing PostgreSQL connection...");
+  await testDatabaseConnection();
+  
+  // Initialize campaigns table
+  console.log("Initializing campaigns table...");
+  await initializeCampaignsTable();
+  
+  // Initialize orders table
+  console.log("Initializing orders table...");
+  await initializeOrdersTable();
+  
+  // Initialize report_single table
+  console.log("Initializing report_single table...");
+  await initializeReportSingleTable();
+  
+  // Initialize reports table
+  console.log("Initializing reports table...");
+  await initializeReportsTable();
+  
+  // Initialize AI tables
+  console.log("Initializing AI tables...");
+  await initializeAIDecisionLogTable();
+  await initializeAIDetectedChangesTable();
+  await initializeRecommendedActionsTable();
   
   // Initialize tokens on server startup
   console.log("Initializing tokens on startup...");
@@ -999,6 +1771,14 @@ app.listen(port, async () => {
       console.log(`✓ Amazon SP-API orders fetched successfully. Revenue: ${globalState.revenue || 0}`);
       if (ordersData.payload && ordersData.payload.Orders) {
         console.log(`  Total orders: ${ordersData.payload.Orders.length}`);
+        
+        // Store orders in database
+        try {
+          const storageResult = await storeOrdersInDatabase(ordersData.payload.Orders);
+          console.log(`✓ Orders stored in database: ${storageResult.stored} new, ${storageResult.updated} updated`);
+        } catch (storageError) {
+          console.error("✗ Failed to store orders in database:", storageError.message);
+        }
       }
     } catch (error) {
       console.error("✗ Failed to fetch Amazon SP-API orders:", error.message);
@@ -1015,113 +1795,11 @@ app.listen(port, async () => {
     try {
       await fetchAmazonAdsProfiles();
       console.log(`✓ Amazon Ads profiles fetched successfully. ProfileId: ${globalState.profileId}`);
-      
-      // Fetch report and save URL after profiles are fetched
-      try {
-        // Use the same default reportId as the /amazon-ads/reports/single endpoint
-        const reportId = globalState.reportId;
-        globalState.reportId = reportId;
-        
-        const reportData = await autoCreateAmazonAdsReport();
-        console.log(`✓ Amazon Ads report fetched successfully. ReportId: ${reportId} Revenue: ${globalState.revenue}`);
-        if (globalState.url) {
-          console.log(`  Report URL saved to globalState`);
-        }
-      } catch (error) {
-        console.error("✗ Failed to fetch Amazon Ads report:", error.message);
-      }
     } catch (error) {
       console.error("✗ Failed to fetch Amazon Ads profiles:", error.message);
     }
   } catch (error) {
     console.error("✗ Failed to refresh Amazon Ads LWA token:", error.message);
-  }
-  
-  // Set up daily cron job to automatically create report
-  // Runs every day at 2 AM Brazilian time (America/Sao_Paulo timezone)
-  // To change the schedule, modify the cron expression:
-  // "0 2 * * *" = every day at 2 AM (default: Brazilian time)
-  // "0 0 * * *" = every day at midnight
-  // "0 0 * * 1" = every Monday at midnight
-  // "* * * * *" = every minute (for testing only)
-  const cronSchedule = process.env.REPORT_CRON_SCHEDULE || "0 2 * * *"; // Default: daily at 2 AM Brazilian time
-  const cronTimezone = process.env.REPORT_CRON_TIMEZONE || "America/Sao_Paulo"; // Brazilian timezone
-  
-  // Validate cron expression
-  if (!cron.validate(cronSchedule)) {
-    console.error(`✗ Invalid cron expression: ${cronSchedule}`);
-    console.error(`  Cron expression must be in format: "minute hour day-of-month month day-of-week"`);
-    console.error(`  Example: "0 2 * * *" (runs daily at 2 AM)`);
-    console.error(`  Current expression is invalid and cron job will NOT be scheduled`);
-  } else {
-    try {
-      // Create a flag to prevent overlapping executions
-      let isRunning = false;
-      
-      // Validate timezone by attempting to use it
-      let timezoneToUse = cronTimezone;
-      try {
-        // Test if timezone is valid by creating a date in that timezone
-        const testDate = new Date().toLocaleString('en-US', { timeZone: cronTimezone });
-        if (!testDate || testDate === 'Invalid Date') {
-          throw new Error(`Invalid timezone: ${cronTimezone}`);
-        }
-      } catch (tzError) {
-        console.warn(`⚠ Invalid timezone "${cronTimezone}", falling back to UTC`);
-        timezoneToUse = "UTC";
-      }
-      
-      // Create the cron job with error handling
-      let cronJob;
-      try {
-        cronJob = cron.schedule(cronSchedule, async () => {
-          if (isRunning) {
-            console.log(`[Cron] Previous job still running, skipping this execution at ${new Date().toISOString()}`);
-            return;
-          }
-          
-          isRunning = true;
-          const triggerTime = new Date().toISOString();
-          console.log(`[Cron] Scheduled report creation triggered at ${triggerTime} (timezone: ${timezoneToUse})`);
-          
-          try {
-            await autoCreateAmazonAdsReport();
-            console.log(`[Cron] Scheduled report creation completed successfully at ${new Date().toISOString()}`);
-          } catch (error) {
-            console.error(`[Cron] Error in scheduled report creation:`, error.message);
-            console.error(`[Cron] Full error:`, error);
-          } finally {
-            isRunning = false;
-          }
-        }, {
-          scheduled: true,
-          timezone: timezoneToUse
-        });
-        
-        // Verify the job was created successfully
-        if (cronJob) {
-          console.log(`✓ Daily cron job scheduled successfully`);
-          console.log(`  Schedule: ${cronSchedule}`);
-          console.log(`  Timezone: ${timezoneToUse}${timezoneToUse !== cronTimezone ? ` (original: ${cronTimezone} was invalid)` : ''}`);
-          console.log(`  Next execution will be at the scheduled time in ${timezoneToUse}`);
-          console.log(`  Current time (local): ${new Date().toString()}`);
-          console.log(`  Current time (UTC): ${new Date().toUTCString()}`);
-          console.log(`  Current reportId in globalState: ${globalState.reportId || "None"}`);
-          console.log(`  Test the cron manually via: GET /amazon-ads/reports/test-cron`);
-        } else {
-          console.error(`✗ Failed to create cron job - cron.schedule() returned null/undefined`);
-        }
-      } catch (scheduleError) {
-        console.error(`✗ Error calling cron.schedule():`, scheduleError.message);
-        console.error(`  This might be due to an invalid cron expression or timezone`);
-        console.error(`  Cron expression: ${cronSchedule}`);
-        console.error(`  Timezone: ${timezoneToUse}`);
-        console.error(`  Full error:`, scheduleError);
-      }
-    } catch (error) {
-      console.error(`✗ Error setting up cron job:`, error.message);
-      console.error(`  Stack trace:`, error.stack);
-    }
   }
 });
 
