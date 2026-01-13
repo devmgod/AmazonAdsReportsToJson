@@ -16,6 +16,7 @@ import Navigation from './Navigation';
 import ApiStatusCards from './ApiStatusCards';
 import LineChart from './LineChart';
 import MetricCard from './MetricCard';
+import { fmt } from '../utils/format';
 
 function Dashboard() {
   const [activeTab, setActiveTab] = useState('home');
@@ -825,12 +826,12 @@ function Dashboard() {
               />
               <MetricCard
                 title="TACOS"
-                value={`${tacos.toFixed(2)}%`}
+                value={`${fmt(tacos, 2)}%`}
                 color="orange"
               />
               <MetricCard
                 title="VENDAS TOTAIS"
-                value={`R$${totalSales.toFixed(2)}`}
+                value={`R$${fmt(totalSales, 2)}`}
                 color="green"
               />
               <MetricCard
@@ -867,12 +868,12 @@ function Dashboard() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6">
               <MetricCard
                 title="GASTO TOTAL ADS"
-                value={`R$${totalAdSpend.toFixed(2)}`}
+                value={`R$${fmt(totalAdSpend, 2)}`}
                 color="purple"
               />
               <MetricCard
                 title="CPC MÉDIO"
-                value={`R$${averageCPC.toFixed(2)} por clique`}
+                value={`R$${fmt(averageCPC, 2)} por clique`}
                 color="teal"
               />
               <MetricCard
@@ -891,12 +892,12 @@ function Dashboard() {
               />
               <MetricCard
                 title="ACOS"
-                value={`${reportSummary.acos.toFixed(2)}%`}
+                value={`${fmt(reportSummary.acos, 2)}%`}
                 color="red"
               />
               <MetricCard
                 title="ROAS"
-                value={`${reportSummary.roas.toFixed(2)}%`}
+                value={`${fmt(reportSummary.roas, 2)}%`}
                 color="green"
               />
             </div>
@@ -961,13 +962,13 @@ function Dashboard() {
                               {report.clicks?.toLocaleString() || 0}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                              R$ {parseFloat(report.cost || 0).toFixed(2)}
+                              R$ {fmt(parseFloat(report.cost || 0), 2)}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                              R$ {parseFloat(report.sales14d || 0).toFixed(2)}
+                              R$ {fmt(parseFloat(report.sales14d || 0), 2)}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                              {report.acosClicks14d ? `${parseFloat(report.acosClicks14d).toFixed(2)}%` : '-'}
+                              {report.acosClicks14d ? `${fmt(parseFloat(report.acosClicks14d), 2)}%` : '-'}
                             </td>
                           </tr>
                           ))}
@@ -1038,7 +1039,7 @@ function Dashboard() {
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                              {campaign.dailyBudget ? `R$ ${parseFloat(campaign.dailyBudget).toFixed(2)}` : '-'}
+                              {campaign.dailyBudget ? `R$ ${fmt(parseFloat(campaign.dailyBudget), 2)}` : '-'}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                               {campaign.startDate || '-'}
@@ -1112,7 +1113,7 @@ function Dashboard() {
                               {order.FulfillmentChannel || '-'}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                              {order.OrderTotal?.Amount ? `${order.OrderTotal.CurrencyCode || 'USD'} ${parseFloat(order.OrderTotal.Amount).toFixed(2)}` : '-'}
+                              {order.OrderTotal?.Amount ? `${order.OrderTotal.CurrencyCode || 'USD'} ${fmt(parseFloat(order.OrderTotal.Amount), 2)}` : '-'}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                               {(order.NumberOfItemsShipped || 0) + (order.NumberOfItemsUnshipped || 0)}
@@ -1587,13 +1588,13 @@ function Dashboard() {
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <MetricCard
                       title="TOTAL SALES"
-                      value={`R$${totalSalesAmount.toFixed(2)}`}
+                      value={`R$${fmt(totalSalesAmount, 2)}`}
                       subtitle="Total sales from all orders"
                       color="green"
                     />
                     <MetricCard
                       title="ORGANIC SALES"
-                      value={`R$${organicSales.toFixed(2)}`}
+                      value={`R$${fmt(organicSales, 2)}`}
                       subtitle="Sales not attributed to ads"
                       color="blue"
                     />
