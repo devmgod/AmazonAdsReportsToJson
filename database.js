@@ -7,16 +7,25 @@ const { Pool } = pkg;
 dotenv.config();
 
 // PostgreSQL connection configuration
-const dbConfig = {
-  host: process.env.DB_HOST || "localhost",
-  port: parseInt(process.env.DB_PORT || "5432"),
-  database: process.env.DB_NAME || "amazon_ads_api",
-  user: process.env.DB_USER || "postgres",
-  password: process.env.DB_PASSWORD || "postgres",
-  max: 20, // Maximum number of clients in the pool
-  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
-};
+// Use DATABASE_URL if available, otherwise fall back to individual connection parameters
+const dbConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+      max: 20, // Maximum number of clients in the pool
+      idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
+      connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
+    }
+  : {
+      host: process.env.DB_HOST || "localhost",
+      port: parseInt(process.env.DB_PORT || "5432"),
+      database: process.env.DB_NAME || "amazon_ads_api",
+      user: process.env.DB_USER || "postgres",
+      password: process.env.DB_PASSWORD || "postgres",
+      max: 20, // Maximum number of clients in the pool
+      idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
+      connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
+    };
 
 // Create PostgreSQL connection pool
 const pool = new Pool(dbConfig);
@@ -35,9 +44,10 @@ export async function testDatabaseConnection() {
   try {
     const client = await pool.connect();
     const result = await client.query("SELECT NOW()");
+    const dbInfo = getDatabaseInfo();
     console.log("✓ PostgreSQL connection successful");
-    console.log(`  Database: ${dbConfig.database}`);
-    console.log(`  Host: ${dbConfig.host}:${dbConfig.port}`);
+    console.log(`  Database: ${dbInfo.database}`);
+    console.log(`  Host: ${dbInfo.host}`);
     console.log(`  Server time: ${result.rows[0].now}`);
     client.release();
     return true;
@@ -52,6 +62,21 @@ export async function testDatabaseConnection() {
  * @returns {Object} Database configuration info
  */
 export function getDatabaseInfo() {
+  if (process.env.DATABASE_URL) {
+    // Parse DATABASE_URL to extract database and host info
+    try {
+      const url = new URL(process.env.DATABASE_URL);
+      return {
+        database: url.pathname.slice(1) || 'unknown', // Remove leading slash
+        host: `${url.hostname}:${url.port || '5432'}`,
+      };
+    } catch (error) {
+      return {
+        database: 'unknown',
+        host: 'unknown',
+      };
+    }
+  }
   return {
     database: dbConfig.database,
     host: `${dbConfig.host}:${dbConfig.port}`,
