@@ -2,6 +2,7 @@ import express from "express";
 import fetch from "node-fetch";
 import zlib from "zlib";
 import dotenv from "dotenv";
+import cors from "cors";
 import {
   testDatabaseConnection,
   initializeCampaignsTable,
@@ -42,6 +43,16 @@ const redirectUri = process.env.REDIRECT_URI;
 const defaultMarketplaceId = process.env.DEFAULT_MARKETPLACE_ID || "A2Q3Y263D00KWC";
 
 const app = express();
+
+// Enable CORS with specific origins
+app.use(cors({
+  origin: [
+    "https://amazonadsreportstojson-1.onrender.com",
+    "http://localhost:5173"
+  ],
+  credentials: true
+}));
+
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
@@ -411,14 +422,6 @@ async function fetchAmazonSPAPIOrders(queryParams = {}, region = 'na') {
   return data;
 }
 
-// Basic allowlist CORS for your Retool app domain (adjust!)
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*"); // tighten in prod
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
 
 /**
  * GET /db/test
