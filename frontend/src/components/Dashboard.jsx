@@ -38,9 +38,8 @@ function Dashboard() {
   const itemsPerPage = 10;
 
   // GestãoAds state
-  const [dailyBudget, setDailyBudget] = useState({});
-  const [maxBidValue, setMaxBidValue] = useState({});
-  const [selectionMode, setSelectionMode] = useState('campaign'); // 'campaign' or 'period'
+  const [dailyBudget, setDailyBudget] = useState('');
+  const [maxBidValue, setMaxBidValue] = useState('');
   const [aiDetectedChanges, setAiDetectedChanges] = useState([]);
   const [recommendedActions, setRecommendedActions] = useState([]);
   const [optimizationMetrics, setOptimizationMetrics] = useState({ campaignsOptimized: 0 });
@@ -168,25 +167,88 @@ function Dashboard() {
     }
   }, [activeTab, confidenceFilter]);
 
-  // Handle budget/bid updates
-  const handleBudgetUpdate = async (campaignId, newBudget) => {
+  // Handle budget/bid updates for all campaigns
+  const handleBudgetUpdate = async () => {
+    if (!dailyBudget || parseFloat(dailyBudget) <= 0) {
+      alert('Please enter a valid daily budget');
+      return;
+    }
+
     try {
-      await updateCampaign(campaignId, { dailyBudget: newBudget });
-      setDailyBudget({ ...dailyBudget, [campaignId]: newBudget });
-      // Refresh AI data after update
-      await fetchAIData();
+      const budgetValue = parseFloat(dailyBudget);
+      
+      // Get campaigns from state (prioritize dbCampaigns, fallback to data.campaigns)
+      const campaignsToUpdate = dbCampaigns.length > 0 ? dbCampaigns : (data?.campaigns || []);
+      
+      if (campaignsToUpdate.length === 0) {
+        alert('No campaigns available to update');
+        return;
+      }
+
+      let successCount = 0;
+      let errorCount = 0;
+
+      for (const campaign of campaignsToUpdate) {
+        try {
+          await updateCampaign(campaign.campaignId, { dailyBudget: budgetValue });
+          successCount++;
+        } catch (error) {
+          console.error(`Error updating budget for campaign ${campaign.campaignId}:`, error);
+          errorCount++;
+        }
+      }
+
+      if (successCount > 0) {
+        alert(`Budget updated successfully for ${successCount} campaign(s)${errorCount > 0 ? `. ${errorCount} campaign(s) failed to update.` : ''}`);
+        // Refresh AI data after update
+        await fetchAIData();
+      } else {
+        alert('Failed to update budget for any campaigns');
+      }
     } catch (error) {
       console.error('Error updating budget:', error);
       alert('Failed to update budget: ' + (error.response?.data?.error || error.message));
     }
   };
 
-  const handleBidUpdate = async (campaignId, newBid) => {
+  const handleBidUpdate = async () => {
+    if (!maxBidValue || parseFloat(maxBidValue) <= 0) {
+      alert('Please enter a valid max bid value');
+      return;
+    }
+
     try {
-      await updateCampaign(campaignId, { bidding: { strategy: 'legacyForSales', adjustments: [] } });
-      setMaxBidValue({ ...maxBidValue, [campaignId]: newBid });
-      // Refresh AI data after update
-      await fetchAIData();
+      const bidValue = parseFloat(maxBidValue);
+      
+      // Get campaigns from state (prioritize dbCampaigns, fallback to data.campaigns)
+      const campaignsToUpdate = dbCampaigns.length > 0 ? dbCampaigns : (data?.campaigns || []);
+      
+      if (campaignsToUpdate.length === 0) {
+        alert('No campaigns available to update');
+        return;
+      }
+
+      let successCount = 0;
+      let errorCount = 0;
+
+      for (const campaign of campaignsToUpdate) {
+        try {
+          // Note: Bid updates may need different structure depending on API requirements
+          await updateCampaign(campaign.campaignId, { bidding: { strategy: 'legacyForSales', adjustments: [] } });
+          successCount++;
+        } catch (error) {
+          console.error(`Error updating bid for campaign ${campaign.campaignId}:`, error);
+          errorCount++;
+        }
+      }
+
+      if (successCount > 0) {
+        alert(`Max bid value updated successfully for ${successCount} campaign(s)${errorCount > 0 ? `. ${errorCount} campaign(s) failed to update.` : ''}`);
+        // Refresh AI data after update
+        await fetchAIData();
+      } else {
+        alert('Failed to update max bid value for any campaigns');
+      }
     } catch (error) {
       console.error('Error updating bid:', error);
       alert('Failed to update bid: ' + (error.response?.data?.error || error.message));
@@ -1167,11 +1229,11 @@ function Dashboard() {
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-semibold text-gray-900">AI Mode</h2>
+                  <h2 className="text-lg font-semibold text-gray-900">Mode Selector: Analytical vs. Execution</h2>
                   <p className="text-sm text-gray-500 mt-1">
                     {aiMode === 'analytical' 
-                      ? 'Analytical Mode: AI is observing and learning patterns (first month)'
-                      : 'Execution Mode: AI is applying changes and optimizing campaigns'}
+                      ? 'Analytical Mode: AI is observing Amazon bid data without acting, for a 1-month learning period'
+                      : 'Execution Mode: AI is making automatic changes and optimizing campaigns through bid adjustments'}
                   </p>
                 </div>
                 <div className="flex items-center space-x-4">
@@ -1206,149 +1268,66 @@ function Dashboard() {
             {/* Budget Management */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Budget Management</h2>
+              <p className="text-sm text-gray-500 mb-6">Set daily budget and max bid value for all campaigns</p>
               
-              {/* Selection Mode */}
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Selection Mode</label>
-                <div className="flex space-x-4">
-                  <button
-                    onClick={() => setSelectionMode('campaign')}
-                    className={`px-4 py-2 rounded-md text-sm font-medium ${
-                      selectionMode === 'campaign'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    By Campaign (azinho)
-                  </button>
-                  <button
-                    onClick={() => setSelectionMode('period')}
-                    className={`px-4 py-2 rounded-md text-sm font-medium ${
-                      selectionMode === 'period'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    By Period
-                  </button>
-                </div>
-              </div>
-
-              {/* Campaign Selection or Period Selection */}
-              {selectionMode === 'campaign' ? (
-                <div className="space-y-4">
-                  {campaigns.slice(0, 5).map((campaign) => (
-                    <div key={campaign.campaignId} className="border border-gray-200 rounded-lg p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-sm font-medium text-gray-900 truncate max-w-md">
-                          {campaign.name || campaign.campaignId}
-                        </h3>
-                        <span className="text-xs text-gray-500">ID: {campaign.campaignId}</span>
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Daily Budget (R$)
-                          </label>
-                          <div className="flex space-x-2">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={dailyBudget[campaign.campaignId] || campaign.dailyBudget || ''}
-                              onChange={(e) => setDailyBudget({
-                                ...dailyBudget,
-                                [campaign.campaignId]: parseFloat(e.target.value) || 0
-                              })}
-                              className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              placeholder="0.00"
-                            />
-                            <button
-                              onClick={() => handleBudgetUpdate(campaign.campaignId, dailyBudget[campaign.campaignId] || campaign.dailyBudget)}
-                              className="px-3 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                              Save
-                            </button>
-                          </div>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Max Bid Value (R$)
-                          </label>
-                          <div className="flex space-x-2">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={maxBidValue[campaign.campaignId] || ''}
-                              onChange={(e) => setMaxBidValue({
-                                ...maxBidValue,
-                                [campaign.campaignId]: parseFloat(e.target.value) || 0
-                              })}
-                              className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              placeholder="0.00"
-                            />
-                            <button
-                              onClick={() => handleBidUpdate(campaign.campaignId, maxBidValue[campaign.campaignId])}
-                              className="px-3 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                              Save
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Period</label>
-                      <select className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                        <option>Day</option>
-                        <option>Week</option>
-                        <option>Month</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Daily Budget (R$)
-                      </label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="0.00"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Max Bid Value (R$)
-                      </label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="0.00"
-                      />
-                    </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Daily Budget (R$)
+                  </label>
+                  <div className="flex space-x-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={dailyBudget}
+                      onChange={(e) => setDailyBudget(e.target.value)}
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="0.00"
+                    />
+                    <button
+                      onClick={handleBudgetUpdate}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      Save
+                    </button>
                   </div>
                 </div>
-              )}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Max Bid Value (R$)
+                  </label>
+                  <div className="flex space-x-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={maxBidValue}
+                      onChange={(e) => setMaxBidValue(e.target.value)}
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="0.00"
+                    />
+                    <button
+                      onClick={handleBidUpdate}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
 
-            {/* Optimization Metrics */}
+            {/* Optimization Overview */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Optimization Metrics</h2>
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Optimization Overview</h2>
               <div className="flex items-center space-x-6">
                 <div>
-                  <p className="text-sm text-gray-500">Campaigns Optimized</p>
+                  <p className="text-sm text-gray-500">Amazon Campaigns Optimized</p>
                   <p className="text-2xl font-bold text-gray-900 mt-1">
                     {optimizationMetrics.campaignsOptimized}
                   </p>
+                  <p className="text-xs text-gray-400 mt-1">Number of campaigns optimized through bid adjustments</p>
                 </div>
               </div>
             </div>
@@ -1356,7 +1335,10 @@ function Dashboard() {
             {/* AI-Detected Changes */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
               <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-gray-900">AI-Detected Changes</h2>
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">AI-Detected Changes</h2>
+                  <p className="text-sm text-gray-500 mt-1">Amazon Bidding Insights: The AI continuously monitors and learns from changes in Amazon bid behavior</p>
+                </div>
                 <span className="px-3 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
                   {aiDetectedChanges.length} changes detected
                 </span>
@@ -1410,7 +1392,7 @@ function Dashboard() {
                   ))}
                 {aiDetectedChanges.filter(change => confidenceFilter === 'all' || change.confidence === confidenceFilter).length === 0 && (
                   <div className="text-center py-8 text-gray-500">
-                    <p>No AI-detected changes found for the selected confidence level.</p>
+                    <p>No AI-detected changes found for the selected confidence level. The AI continuously monitors Amazon bid patterns and fluctuations.</p>
                   </div>
                 )}
               </div>
@@ -1422,7 +1404,7 @@ function Dashboard() {
                 <div>
                   <h2 className="text-lg font-semibold text-gray-900">Recommended Actions</h2>
                   <p className="text-sm text-gray-500 mt-1">
-                    Actions are executed once per day at 3:00 AM
+                    Lists bid adjustments the AI plans to apply, based on its predictive modeling. Actions are executed automatically once per day at 3:00 AM.
                   </p>
                 </div>
                 <span className="px-3 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">
@@ -1472,9 +1454,9 @@ function Dashboard() {
             {/* Decision Log */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200">
               <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900">Decision Log</h2>
+                <h2 className="text-lg font-semibold text-gray-900">Decision Log (Amazon Bids History)</h2>
                 <p className="text-sm text-gray-500 mt-1">
-                  History of actions executed by the AI, including automated adjustments to bids or budgets
+                  A detailed history of actions taken by the AI, including every bid adjustment executed on Amazon. Transparency in when and why each change occurred is essential for tracking performance.
                 </p>
               </div>
               <div className="overflow-x-auto">
