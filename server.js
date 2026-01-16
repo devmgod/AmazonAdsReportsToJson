@@ -41,7 +41,6 @@ const solutionProviderToken = process.env.SOLUTION_PROVIDER_TOKEN;
 const adsSolutionProviderToken = process.env.ADS_SOLUTION_PROVIDER_TOKEN;
 const redirectUri = process.env.REDIRECT_URI;
 const defaultMarketplaceId = process.env.DEFAULT_MARKETPLACE_ID || "A2Q3Y263D00KWC";
-const claudeApiKey = process.env.CLAUDE_API_KEY || "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";
 
 const app = express();
 
@@ -916,157 +915,8 @@ async function updateAmazonAdsCampaign(campaignId, updates) {
 }
 
 /**
- * Helper function to call Claude API for campaign analysis
- * @param {Object} campaignData - Campaign data with metrics
- * @param {string} aiMode - 'analytical' or 'execution'
- * @returns {Object} Analysis result from Claude
- */
-async function callClaudeAPI(campaignData, aiMode = 'analytical') {
-  if (!claudeApiKey) {
-    throw new Error("Claude API key is not configured");
-  }
-
-  const systemPrompt = `You are an expert Amazon Ads campaign optimization AI. Analyze campaign performance data and provide recommendations.
-
-Your task is to:
-1. Detect significant changes in campaign performance patterns
-2. Recommend specific actions to optimize campaigns
-3. Provide confidence levels (high, medium, low) for your recommendations
-
-For each campaign, analyze:
-- ROAS (Return on Ad Spend): Target is >2.0, excellent is >3.0
-- ACOS (Advertising Cost of Sales): Target is <30%, concerning if >50%
-- CTR (Click-Through Rate): Good is >1%, excellent is >2%
-- CPC (Cost Per Click): Should be optimized based on conversion rates
-- Budget utilization and performance trends
-
-Return your analysis in JSON format with this structure:
-{
-  "detectedChange": {
-    "description": "Brief description of the detected pattern",
-    "details": "Detailed explanation",
-    "confidence": "high|medium|low",
-    "patternType": "high_roas|low_performance|ctr_conversion_mismatch|trending_up|trending_down|other"
-  },
-  "recommendedAction": {
-    "type": "Budget Adjustment|Bid Adjustment|Pause Campaign|Other",
-    "title": "Action title",
-    "description": "Detailed action description",
-    "actionData": {
-      "action": "update_budget|update_bid|pause",
-      "oldBudget": number,
-      "newBudget": number,
-      "oldBid": number,
-      "newBid": number
-    }
-  }
-}
-
-If no significant changes or actions are needed, return null for detectedChange and recommendedAction.`;
-
-  const userPrompt = `Analyze this Amazon Ads campaign:
-
-Campaign Name: ${campaignData.campaignName}
-Campaign ID: ${campaignData.campaignId}
-Current Daily Budget: R$ ${campaignData.dailyBudget.toFixed(2)}
-Campaign State: ${campaignData.state}
-
-Performance Metrics (last ${campaignData.reportDays} days):
-- Total Cost: R$ ${campaignData.totalCost.toFixed(2)}
-- Total Sales (14d): R$ ${campaignData.totalSales.toFixed(2)}
-- Total Clicks: ${campaignData.totalClicks}
-- Total Impressions: ${campaignData.totalImpressions}
-- ROAS: ${campaignData.roas.toFixed(2)}x
-- ACOS: ${campaignData.acos.toFixed(2)}%
-- CTR: ${campaignData.ctr.toFixed(2)}%
-- CPC: R$ ${campaignData.cpc.toFixed(2)}
-
-Recent Report Data:
-${JSON.stringify(campaignData.recentReports.slice(-7), null, 2)}
-
-AI Mode: ${aiMode} ${aiMode === 'execution' ? '(Actions will be executed automatically)' : '(Analysis only)'}
-
-Provide your analysis and recommendations in JSON format.`;
-
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": claudeApiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "claude-3-5-sonnet-20241022",
-        max_tokens: 4000,
-        system: systemPrompt,
-        messages: [
-          {
-            role: "user",
-            content: userPrompt
-          }
-        ]
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error?.message || `Claude API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    
-    // Extract text content from Claude's response
-    let content = "";
-    if (data.content && Array.isArray(data.content)) {
-      content = data.content
-        .filter(item => item.type === "text")
-        .map(item => item.text)
-        .join("");
-    } else if (data.content) {
-      content = data.content;
-    }
-
-    // Try to parse JSON from the response
-    // Claude might return JSON wrapped in markdown code blocks
-    let jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
-    if (!jsonMatch) {
-      jsonMatch = content.match(/```\s*([\s\S]*?)\s*```/);
-    }
-    
-    const jsonText = jsonMatch ? jsonMatch[1] : content.trim();
-    
-    try {
-      const analysis = JSON.parse(jsonText);
-      return analysis;
-    } catch (parseError) {
-      // If JSON parsing fails, try to extract JSON object from the text
-      const jsonObjectMatch = jsonText.match(/\{[\s\S]*\}/);
-      if (jsonObjectMatch) {
-        try {
-          return JSON.parse(jsonObjectMatch[0]);
-        } catch (e) {
-          console.error("Failed to parse Claude response as JSON:", e);
-          console.error("Response content:", content);
-          // Return a fallback structure
-          return {
-            detectedChange: null,
-            recommendedAction: null,
-            error: "Failed to parse Claude response"
-          };
-        }
-      }
-      throw new Error("Claude API did not return valid JSON");
-    }
-  } catch (error) {
-    console.error("Error calling Claude API:", error);
-    throw error;
-  }
-}
-
-/**
  * AI Decision Engine
- * Analyzes campaign performance and generates recommendations using Claude API
+ * Analyzes campaign performance and generates recommendations
  */
 async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytical') {
   const analysis = {
@@ -1105,78 +955,107 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
     const cpc = totalClicks > 0 ? totalCost / totalClicks : 0;
     const dailyBudget = parseFloat(campaign.dailyBudget) || 0;
 
-    // Prepare campaign data for Claude API
-    const campaignData = {
-      campaignId: campaign.campaignId,
-      campaignName: campaign.name || `Campaign ${campaign.campaignId}`,
-      state: campaign.state,
-      dailyBudget: dailyBudget,
-      totalCost: totalCost,
-      totalSales: totalSales,
-      totalClicks: totalClicks,
-      totalImpressions: totalImpressions,
-      roas: roas,
-      acos: acos,
-      ctr: ctr,
-      cpc: cpc,
-      reportDays: campaignReports.length,
-      recentReports: campaignReports.map(r => ({
-        date: r.date,
-        cost: parseFloat(r.cost) || 0,
-        sales14d: parseFloat(r.sales14d) || 0,
-        clicks: parseInt(r.clicks) || 0,
-        impressions: parseInt(r.impressions) || 0,
-        roas: parseFloat(r.cost) > 0 ? (parseFloat(r.sales14d) || 0) / parseFloat(r.cost) : 0,
-        acos: parseFloat(r.sales14d) > 0 ? ((parseFloat(r.cost) || 0) / parseFloat(r.sales14d)) * 100 : 0
-      }))
-    };
-
-    // Call Claude API for intelligent analysis
+    // Decision logic based on performance
+    let confidence = 'medium';
     let detectedChange = null;
     let recommendedAction = null;
 
-    try {
-      const claudeAnalysis = await callClaudeAPI(campaignData, aiMode);
+    // High ROAS (>3.0) - Increase budget
+    if (roas > 3.0 && campaignReports.length >= 7) {
+      confidence = 'high';
+      const suggestedIncrease = Math.min(dailyBudget * 0.2, 50); // Max 20% or R$50
+      
+      detectedChange = {
+        date: new Date(),
+        description: `High ROAS detected: Campaign "${campaign.name}" shows ${roas.toFixed(2)}x ROAS`,
+        details: `Campaign demonstrates consistently high return. Current daily budget: R$ ${dailyBudget.toFixed(2)}. Recommend increasing by R$ ${suggestedIncrease.toFixed(2)}.`,
+        confidence: 'high',
+        campaignId: campaign.campaignId,
+        patternType: 'high_roas'
+      };
 
-      // Process detected change from Claude
-      if (claudeAnalysis.detectedChange) {
-        detectedChange = {
-          date: new Date(),
-          description: claudeAnalysis.detectedChange.description || `AI-detected change in campaign "${campaign.name}"`,
-          details: claudeAnalysis.detectedChange.details || claudeAnalysis.detectedChange.description,
-          confidence: claudeAnalysis.detectedChange.confidence || 'medium',
-          campaignId: campaign.campaignId,
-          patternType: claudeAnalysis.detectedChange.patternType || 'other'
-        };
-      }
-
-      // Process recommended action from Claude
-      if (claudeAnalysis.recommendedAction && (aiMode === 'execution' || aiMode === 'analytical')) {
-        const action = claudeAnalysis.recommendedAction;
-        const actionData = action.actionData || {};
-
+      if (aiMode === 'execution') {
         recommendedAction = {
-          type: action.type || 'Other',
-          title: action.title || `Action for Campaign ${campaign.name}`,
-          description: action.description || action.title,
+          type: 'Budget Adjustment',
+          title: `Increase daily budget for Campaign ${campaign.name}`,
+          description: `Increase daily budget from R$ ${dailyBudget.toFixed(2)} to R$ ${(dailyBudget + suggestedIncrease).toFixed(2)} based on high ROAS performance (${roas.toFixed(2)}x)`,
           campaignId: campaign.campaignId,
           campaignName: campaign.name,
           scheduledTime: '3:00 AM',
           status: 'pending',
           actionData: {
-            action: actionData.action || 'other',
+            action: 'update_budget',
             campaignId: campaign.campaignId,
-            ...(actionData.oldBudget !== undefined && { oldBudget: actionData.oldBudget }),
-            ...(actionData.newBudget !== undefined && { newBudget: actionData.newBudget }),
-            ...(actionData.oldBid !== undefined && { oldBid: actionData.oldBid }),
-            ...(actionData.newBid !== undefined && { newBid: actionData.newBid })
+            oldBudget: dailyBudget,
+            newBudget: dailyBudget + suggestedIncrease
           }
         };
       }
-    } catch (error) {
-      console.error(`Error calling Claude API for campaign ${campaign.campaignId}:`, error.message);
-      // Fallback to basic analysis if Claude API fails
-      // You could implement a fallback logic here if needed
+    }
+    // Low ROAS (<1.5) and high ACOS (>50%) - Decrease budget or pause
+    else if (roas < 1.5 && acos > 50 && campaignReports.length >= 7) {
+      confidence = 'high';
+      const suggestedDecrease = Math.max(dailyBudget * 0.2, 10); // Min 20% or R$10
+      
+      detectedChange = {
+        date: new Date(),
+        description: `Low ROAS and high ACOS: Campaign "${campaign.name}" shows ${roas.toFixed(2)}x ROAS and ${acos.toFixed(2)}% ACOS`,
+        details: `Campaign performance is below target. Current daily budget: R$ ${dailyBudget.toFixed(2)}. Recommend decreasing by R$ ${suggestedDecrease.toFixed(2)} or pausing.`,
+        confidence: 'high',
+        campaignId: campaign.campaignId,
+        patternType: 'low_performance'
+      };
+
+      if (aiMode === 'execution' && dailyBudget > 20) {
+        recommendedAction = {
+          type: 'Budget Adjustment',
+          title: `Decrease daily budget for Campaign ${campaign.name}`,
+          description: `Decrease daily budget from R$ ${dailyBudget.toFixed(2)} to R$ ${(dailyBudget - suggestedDecrease).toFixed(2)} due to low ROAS (${roas.toFixed(2)}x)`,
+          campaignId: campaign.campaignId,
+          campaignName: campaign.name,
+          scheduledTime: '3:00 AM',
+          status: 'pending',
+          actionData: {
+            action: 'update_budget',
+            campaignId: campaign.campaignId,
+            oldBudget: dailyBudget,
+            newBudget: Math.max(dailyBudget - suggestedDecrease, 10)
+          }
+        };
+      }
+    }
+    // High CTR (>2%) but low conversions - Optimize bids
+    else if (ctr > 2 && roas < 2 && campaignReports.length >= 14) {
+      confidence = 'medium';
+      const currentBid = campaign.bidding?.strategy || cpc;
+      const suggestedBid = currentBid * 0.9; // Reduce by 10%
+      
+      detectedChange = {
+        date: new Date(),
+        description: `High CTR but low conversions: Campaign "${campaign.name}" has ${ctr.toFixed(2)}% CTR but ${roas.toFixed(2)}x ROAS`,
+        details: `Campaign gets clicks but conversions are low. Current CPC: R$ ${cpc.toFixed(2)}. Recommend reducing bid by 10% to improve efficiency.`,
+        confidence: 'medium',
+        campaignId: campaign.campaignId,
+        patternType: 'ctr_conversion_mismatch'
+      };
+
+      if (aiMode === 'execution') {
+        recommendedAction = {
+          type: 'Bid Adjustment',
+          title: `Optimize bid for Campaign ${campaign.name}`,
+          description: `Reduce bid by 10% to improve conversion efficiency. Current CPC: R$ ${cpc.toFixed(2)}`,
+          campaignId: campaign.campaignId,
+          campaignName: campaign.name,
+          scheduledTime: '3:00 AM',
+          status: 'pending',
+          actionData: {
+            action: 'update_bid',
+            campaignId: campaign.campaignId,
+            oldBid: currentBid,
+            newBid: suggestedBid
+          }
+        };
+      }
     }
 
     // Store detected changes
