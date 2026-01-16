@@ -40,6 +40,8 @@ function Dashboard() {
   // GestãoAds state
   const [dailyBudget, setDailyBudget] = useState('');
   const [maxBidValue, setMaxBidValue] = useState('');
+  const [goalType, setGoalType] = useState(''); // 'TACoS', 'ACoS', 'CPC', 'Conversions', 'ROAS'
+  const [targetValue, setTargetValue] = useState('');
   const [aiDetectedChanges, setAiDetectedChanges] = useState([]);
   const [recommendedActions, setRecommendedActions] = useState([]);
   const [optimizationMetrics, setOptimizationMetrics] = useState({ campaignsOptimized: 0 });
@@ -1316,6 +1318,103 @@ function Dashboard() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* Campaign Performance Goals */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Campaign Performance Goals</h2>
+              <p className="text-sm text-gray-500 mb-6">
+                Define your optimization targets to guide AI decision-making. The AI will use these goals to make informed decisions about campaign adjustments.
+              </p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Goal Type <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={goalType}
+                    onChange={(e) => setGoalType(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Select a goal type</option>
+                    <option value="TACoS">TACoS (Total Advertising Cost of Sales)</option>
+                    <option value="ACoS">ACoS (Advertising Cost of Sales)</option>
+                    <option value="CPC">Cost per Click (CPC)</option>
+                    <option value="Conversions">Conversions</option>
+                    <option value="ROAS">ROAS (Return on Ad Spend)</option>
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Select the metric you want to optimize for
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Target Value <span className="text-red-500">*</span>
+                  </label>
+                  <div className="flex space-x-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={targetValue}
+                      onChange={(e) => setTargetValue(e.target.value)}
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder={goalType === 'TACoS' || goalType === 'ACoS' ? 'e.g., 25.00 (%)' : goalType === 'CPC' ? 'e.g., 1.50 (R$)' : goalType === 'ROAS' ? 'e.g., 3.00 (ratio)' : 'e.g., 100 (count)'}
+                      disabled={!goalType}
+                    />
+                    <button
+                      onClick={() => {
+                        if (!goalType || !targetValue) {
+                          alert('Please select a goal type and enter a target value');
+                          return;
+                        }
+                        // TODO: Save goal configuration to backend
+                        alert(`Goal configured: ${goalType} = ${targetValue}`);
+                      }}
+                      disabled={!goalType || !targetValue}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      Save Goal
+                    </button>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {goalType === 'TACoS' || goalType === 'ACoS' 
+                      ? 'Enter target percentage (e.g., 25.00 for 25%)'
+                      : goalType === 'CPC'
+                      ? 'Enter target cost per click in R$'
+                      : goalType === 'ROAS'
+                      ? 'Enter target ROAS ratio (e.g., 3.00 for 3x return)'
+                      : goalType === 'Conversions'
+                      ? 'Enter target number of conversions'
+                      : 'Enter your target value'}
+                  </p>
+                </div>
+              </div>
+              
+              {/* Display current goal if set */}
+              {goalType && targetValue && (
+                <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-blue-900">Current Performance Goal</p>
+                      <p className="text-sm text-blue-700 mt-1">
+                        <span className="font-semibold">{goalType}:</span> {targetValue}
+                        {goalType === 'TACoS' || goalType === 'ACoS' ? '%' : goalType === 'CPC' ? ' R$' : goalType === 'ROAS' ? 'x' : ''}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setGoalType('');
+                        setTargetValue('');
+                      }}
+                      className="px-3 py-1 text-xs font-medium text-blue-700 hover:text-blue-900 hover:bg-blue-100 rounded-md"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Optimization Overview */}
