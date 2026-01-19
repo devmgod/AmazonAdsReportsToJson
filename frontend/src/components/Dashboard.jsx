@@ -71,6 +71,8 @@ function Dashboard() {
   });
   const [reportsApiSuccess, setReportsApiSuccess] = useState(false);
   const [singleReportComplete, setSingleReportComplete] = useState(false);
+  const [pendingTimer, setPendingTimer] = useState(0); // Time in seconds
+  const [timerActive, setTimerActive] = useState(false); // Flag to control timer
 
   const fetchData = async () => {
     try {
@@ -196,9 +198,45 @@ function Dashboard() {
     if (apiResults.single && apiResults.single.status) {
       const status = apiResults.single.status.toUpperCase();
       const isComplete = status === 'SUCCESS' || status === 'COMPLETED';
+      const isPending = status === 'PENDING' || status === 'IN_PROGRESS' || status === 'PROCESSING';
       setSingleReportComplete(isComplete);
+      
+      // Stop timer if complete, keep running if pending
+      if (isComplete) {
+        setTimerActive(false);
+      } else if (isPending && !timerActive) {
+        setTimerActive(true);
+      }
     }
-  }, [apiResults.single]);
+  }, [apiResults.single, timerActive]);
+
+  // Timer effect - increment every second when timer is active
+  useEffect(() => {
+    let interval = null;
+    if (timerActive) {
+      interval = setInterval(() => {
+        setPendingTimer(prev => prev + 1);
+      }, 1000);
+    }
+    
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
+  }, [timerActive]);
+
+  // Format time display (MM:SS or HH:MM:SS)
+  const formatTime = (seconds) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    
+    if (hours > 0) {
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
 
   // Handle budget/bid updates for all campaigns
   const handleBudgetUpdate = async () => {
@@ -340,8 +378,13 @@ function Dashboard() {
 
   const handleCallSingleReport = async () => {
     try {
+      // Reset timer and start counting
+      setPendingTimer(0);
+      setTimerActive(true);
+      
       setApiLoading(prev => ({ ...prev, single: true }));
       setApiErrors(prev => ({ ...prev, single: null }));
+      
       const result = await getAmazonAdsReport();
       setApiResults(prev => ({ ...prev, single: result }));
       
@@ -350,10 +393,16 @@ function Dashboard() {
       const isComplete = status === 'SUCCESS' || status === 'COMPLETED';
       setSingleReportComplete(isComplete);
       
+      // Timer will be stopped by useEffect when status becomes complete
+      
       alert(`Report retrieved successfully! Status: ${result.status || 'N/A'}`);
       // Refresh database data after retrieving report
       await fetchDatabaseData();
     } catch (error) {
+      // Stop timer on error
+      setTimerActive(false);
+      setPendingTimer(0);
+      
       const errorMessage = error.response?.data?.error || error.message || 'Failed to get report';
       setApiErrors(prev => ({ ...prev, single: errorMessage }));
       setSingleReportComplete(false); // Disable third button on error
@@ -962,7 +1011,7 @@ function Dashboard() {
                     const displayStatus = isComplete ? 'Complete' : isPending ? 'Pending' : status;
                     
                     return (
-                      <div className="mt-2 flex items-center justify-center">
+                      <div className="mt-2 flex flex-col items-center justify-center space-y-1">
                         <span className={`px-3 py-1 text-xs font-medium rounded-full ${
                           isComplete
                             ? 'bg-green-100 text-green-800'
@@ -972,6 +1021,11 @@ function Dashboard() {
                         }`}>
                           Status: {displayStatus}
                         </span>
+                        {isPending && pendingTimer > 0 && (
+                          <span className="text-xs text-gray-600 font-mono">
+                            Pending time: {formatTime(pendingTimer)}
+                          </span>
+                        )}
                       </div>
                     );
                   })()}
