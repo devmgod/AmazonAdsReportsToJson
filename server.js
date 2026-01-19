@@ -17,6 +17,7 @@ import {
   storeReportSingleInDatabase,
   initializeReportsTable,
   storeReportsInDatabase,
+  deleteAllReportsFromDatabase,
   getReportsFromDatabase,
   initializeAIDecisionLogTable,
   initializeAIDetectedChangesTable,
@@ -62,7 +63,7 @@ const globalState = {
   amazonLwaToken: null,
   amazonAdsLwaToken: null,
   profileId: null,
-  reportId: "a4f574e2-ee7f-486a-8303-2d0c13902a5e",
+  reportId: "1304720d-9481-4161-912d-2c9086b0082e",
   url: null,
   revenue: null,
 };
@@ -1352,6 +1353,9 @@ async function fetchAmazonAdsReportSummary() {
   const reportId = globalState.reportId;
   if (reportId && rows.length > 0) {
     try {
+      // Delete all existing reports data before storing new data
+      await deleteAllReportsFromDatabase();
+      // Store new report rows
       await storeReportsInDatabase(reportId, rows);
     } catch (storageError) {
       console.error("Failed to store report rows:", storageError.message);

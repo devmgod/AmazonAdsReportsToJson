@@ -1319,6 +1319,25 @@ export async function initializeReportsTable() {
 }
 
 /**
+ * Delete all data from the reports table
+ * @returns {Promise<Object>} Object with deleted count
+ */
+export async function deleteAllReportsFromDatabase() {
+  try {
+    const client = await pool.connect();
+    const deleteQuery = `DELETE FROM reports`;
+    const result = await client.query(deleteQuery);
+    const deletedCount = result.rowCount;
+    client.release();
+    console.log(`✓ Deleted ${deletedCount} report rows from database`);
+    return { deleted: deletedCount };
+  } catch (error) {
+    console.error("✗ Failed to delete reports from database:", error.message);
+    throw error;
+  }
+}
+
+/**
  * Store report rows data in the database
  * Uses UPSERT (INSERT ... ON CONFLICT UPDATE) to handle duplicates
  * @param {string} reportId - Report ID from report_single table

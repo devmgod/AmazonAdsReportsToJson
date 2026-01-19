@@ -10,7 +10,10 @@ import {
   getRecommendedActions,
   getAIDecisionLog,
   getOptimizationMetrics,
-  updateCampaign
+  updateCampaign,
+  createAmazonAdsReport,
+  getAmazonAdsReport,
+  getAmazonAdsReportJSON
 } from '../services/api';
 import Navigation from './Navigation';
 import ApiStatusCards from './ApiStatusCards';
@@ -49,6 +52,25 @@ function Dashboard() {
   const [decisionLog, setDecisionLog] = useState([]);
   const [aiMode, setAiMode] = useState('analytical'); // 'analytical' or 'execution'
   const [decisionLogPage, setDecisionLogPage] = useState(1);
+  
+  // API call states
+  const [apiLoading, setApiLoading] = useState({
+    reports: false,
+    single: false,
+    reportJson: false
+  });
+  const [apiResults, setApiResults] = useState({
+    reports: null,
+    single: null,
+    reportJson: null
+  });
+  const [apiErrors, setApiErrors] = useState({
+    reports: null,
+    single: null,
+    reportJson: null
+  });
+  const [reportsApiSuccess, setReportsApiSuccess] = useState(false);
+  const [singleReportComplete, setSingleReportComplete] = useState(false);
 
   const fetchData = async () => {
     try {
@@ -169,6 +191,15 @@ function Dashboard() {
     }
   }, [activeTab, confidenceFilter]);
 
+  // Update singleReportComplete state when status changes
+  useEffect(() => {
+    if (apiResults.single && apiResults.single.status) {
+      const status = apiResults.single.status.toUpperCase();
+      const isComplete = status === 'SUCCESS' || status === 'COMPLETED';
+      setSingleReportComplete(isComplete);
+    }
+  }, [apiResults.single]);
+
   // Handle budget/bid updates for all campaigns
   const handleBudgetUpdate = async () => {
     if (!dailyBudget || parseFloat(dailyBudget) <= 0) {
@@ -284,6 +315,70 @@ function Dashboard() {
   const handleProcessReports = () => {
     // TODO: Implement report processing
     console.log('Process reports clicked');
+  };
+
+  // Handle API calls for the three buttons
+  const handleCallReports = async () => {
+    try {
+      setApiLoading(prev => ({ ...prev, reports: true }));
+      setApiErrors(prev => ({ ...prev, reports: null }));
+      const result = await createAmazonAdsReport();
+      setApiResults(prev => ({ ...prev, reports: result }));
+      setReportsApiSuccess(true); // Enable the second button
+      alert(`Report created successfully! Report ID: ${result.reportId || 'N/A'}`);
+      // Refresh database data after creating report
+      await fetchDatabaseData();
+    } catch (error) {
+      const errorMessage = error.response?.data?.error || error.message || 'Failed to create report';
+      setApiErrors(prev => ({ ...prev, reports: errorMessage }));
+      setReportsApiSuccess(false); // Disable the second button on error
+      alert('Error: ' + errorMessage);
+    } finally {
+      setApiLoading(prev => ({ ...prev, reports: false }));
+    }
+  };
+
+  const handleCallSingleReport = async () => {
+    try {
+      setApiLoading(prev => ({ ...prev, single: true }));
+      setApiErrors(prev => ({ ...prev, single: null }));
+      const result = await getAmazonAdsReport();
+      setApiResults(prev => ({ ...prev, single: result }));
+      
+      // Check if status is complete
+      const status = result.status?.toUpperCase();
+      const isComplete = status === 'SUCCESS' || status === 'COMPLETED';
+      setSingleReportComplete(isComplete);
+      
+      alert(`Report retrieved successfully! Status: ${result.status || 'N/A'}`);
+      // Refresh database data after retrieving report
+      await fetchDatabaseData();
+    } catch (error) {
+      const errorMessage = error.response?.data?.error || error.message || 'Failed to get report';
+      setApiErrors(prev => ({ ...prev, single: errorMessage }));
+      setSingleReportComplete(false); // Disable third button on error
+      alert('Error: ' + errorMessage);
+    } finally {
+      setApiLoading(prev => ({ ...prev, single: false }));
+    }
+  };
+
+  const handleCallReportJson = async () => {
+    try {
+      setApiLoading(prev => ({ ...prev, reportJson: true }));
+      setApiErrors(prev => ({ ...prev, reportJson: null }));
+      const result = await getAmazonAdsReportJSON();
+      setApiResults(prev => ({ ...prev, reportJson: result }));
+      alert(`Report JSON retrieved successfully! Data points: ${result.data?.length || 0}`);
+      // Refresh database data after retrieving report JSON
+      await fetchDatabaseData();
+    } catch (error) {
+      const errorMessage = error.response?.data?.error || error.message || 'Failed to get report JSON';
+      setApiErrors(prev => ({ ...prev, reportJson: errorMessage }));
+      alert('Error: ' + errorMessage);
+    } finally {
+      setApiLoading(prev => ({ ...prev, reportJson: false }));
+    }
   };
 
   // Pagination helper functions
@@ -805,6 +900,139 @@ function Dashboard() {
               ordersError={data?.ordersError}
             />
 
+            {/* API Call Buttons */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Amazon Ads API Calls</h2>
+              <p className="text-sm text-gray-500 mb-4">Call Amazon Ads API endpoints to create and retrieve reports</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <button
+                  onClick={handleCallReports}
+                  disabled={apiLoading.reports}
+                  className={`px-6 py-3 rounded-md text-sm font-medium text-white transition-colors ${
+                    apiLoading.reports
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500'
+                  }`}
+                >
+                  {apiLoading.reports ? (
+                    <span className="flex items-center justify-center">
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Loading...
+                    </span>
+                  ) : (
+                    'GET /amazon-ads/reports'
+                  )}
+                </button>
+                <div className="flex flex-col">
+                  <button
+                    onClick={handleCallSingleReport}
+                    disabled={apiLoading.single || !reportsApiSuccess}
+                    className={`px-6 py-3 rounded-md text-sm font-medium text-white transition-colors ${
+                      apiLoading.single || !reportsApiSuccess
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500'
+                    }`}
+                    title={!reportsApiSuccess ? 'Please call /amazon-ads/reports first' : ''}
+                  >
+                    {apiLoading.single ? (
+                      <span className="flex items-center justify-center">
+                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Loading...
+                      </span>
+                    ) : (
+                      'GET /amazon-ads/reports/single'
+                    )}
+                  </button>
+                  {!reportsApiSuccess && (
+                    <p className="mt-2 text-xs text-gray-500 text-center">
+                      Call /amazon-ads/reports first
+                    </p>
+                  )}
+                  {/* Status Indicator */}
+                  {apiResults.single && apiResults.single.status && (() => {
+                    const status = apiResults.single.status.toUpperCase();
+                    const isComplete = status === 'SUCCESS' || status === 'COMPLETED';
+                    const isPending = status === 'PENDING' || status === 'IN_PROGRESS' || status === 'PROCESSING';
+                    const displayStatus = isComplete ? 'Complete' : isPending ? 'Pending' : status;
+                    
+                    return (
+                      <div className="mt-2 flex items-center justify-center">
+                        <span className={`px-3 py-1 text-xs font-medium rounded-full ${
+                          isComplete
+                            ? 'bg-green-100 text-green-800'
+                            : isPending
+                            ? 'bg-yellow-100 text-yellow-800'
+                            : 'bg-red-100 text-red-800'
+                        }`}>
+                          Status: {displayStatus}
+                        </span>
+                      </div>
+                    );
+                  })()}
+                </div>
+                <div className="flex flex-col">
+                  <button
+                    onClick={handleCallReportJson}
+                    disabled={apiLoading.reportJson || !singleReportComplete}
+                    className={`px-6 py-3 rounded-md text-sm font-medium text-white transition-colors ${
+                      apiLoading.reportJson || !singleReportComplete
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : 'bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500'
+                    }`}
+                    title={!singleReportComplete ? 'Please call /amazon-ads/reports/single and wait for status to be Complete' : ''}
+                  >
+                    {apiLoading.reportJson ? (
+                      <span className="flex items-center justify-center">
+                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Loading...
+                      </span>
+                    ) : (
+                      'GET /amazon-ads/report-json'
+                    )}
+                  </button>
+                  {!singleReportComplete && (
+                    <p className="mt-2 text-xs text-gray-500 text-center">
+                      Wait for /amazon-ads/reports/single status to be Complete
+                    </p>
+                  )}
+                </div>
+              </div>
+              {/* Error Messages */}
+              {(apiErrors.reports || apiErrors.single || apiErrors.reportJson) && (
+                <div className="mt-4 space-y-2">
+                  {apiErrors.reports && (
+                    <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                      <p className="text-sm text-red-800">
+                        <strong>Reports API Error:</strong> {apiErrors.reports}
+                      </p>
+                    </div>
+                  )}
+                  {apiErrors.single && (
+                    <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                      <p className="text-sm text-red-800">
+                        <strong>Single Report API Error:</strong> {apiErrors.single}
+                      </p>
+                    </div>
+                  )}
+                  {apiErrors.reportJson && (
+                    <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                      <p className="text-sm text-red-800">
+                        <strong>Report JSON API Error:</strong> {apiErrors.reportJson}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             
             {/* First Row of Charts */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
