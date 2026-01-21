@@ -325,6 +325,7 @@ function Dashboard() {
 
   // Handle budget/bid updates for all campaigns
   const handleBudgetUpdate = async () => {
+    // Daily budget here is a global constraint for the AI, not a direct API call to every campaign.
     if (!dailyBudget || parseFloat(dailyBudget) <= 0) {
       alert('Please enter a valid daily budget');
       return;
@@ -332,38 +333,40 @@ function Dashboard() {
 
     try {
       const budgetValue = parseFloat(dailyBudget);
-      
-      // Get campaigns from state (prioritize dbCampaigns, fallback to data.campaigns)
-      const campaignsToUpdate = dbCampaigns.length > 0 ? dbCampaigns : (data?.campaigns || []);
-      
-      if (campaignsToUpdate.length === 0) {
-        alert('No campaigns available to update');
-        return;
+
+      // Build goal payload using existing goalType/targetValue if set
+      const goalPayload = {
+        goalType: goalType || (userGoals?.goal_type || userGoals?.goalType) || 'TACoS',
+        targetValue: goalType
+          ? (parseFloat(targetValue) || null)
+          : (userGoals?.target_value || userGoals?.targetValue || null),
+        dailyBudget: budgetValue,
+        maxBid: maxBidValue ? parseFloat(maxBidValue) : (userGoals?.max_bid || userGoals?.maxBid || null),
+        editFrequencyHours: userGoals?.edit_frequency_hours || userGoals?.editFrequencyHours || 24,
+        isActive: true,
+      };
+
+      const response = await setUserGoal(goalPayload);
+      const savedGoal = response.goal || response;
+
+      setUserGoals(savedGoal);
+      // Normalise local state with saved goal
+      setGoalType(savedGoal.goal_type || savedGoal.goalType || goalPayload.goalType);
+      if (savedGoal.target_value ?? savedGoal.targetValue) {
+        setTargetValue((savedGoal.target_value ?? savedGoal.targetValue).toString());
+      }
+      setDailyBudget(savedGoal.daily_budget?.toString() || savedGoal.dailyBudget?.toString() || budgetValue.toString());
+      if (savedGoal.max_bid ?? savedGoal.maxBid) {
+        setMaxBidValue((savedGoal.max_bid ?? savedGoal.maxBid).toString());
       }
 
-      let successCount = 0;
-      let errorCount = 0;
+      alert('Daily budget saved as an AI optimization goal. The AI will respect this limit when adjusting campaigns.');
 
-      for (const campaign of campaignsToUpdate) {
-        try {
-          await updateCampaign(campaign.campaignId, { dailyBudget: budgetValue });
-          successCount++;
-        } catch (error) {
-          console.error(`Error updating budget for campaign ${campaign.campaignId}:`, error);
-          errorCount++;
-        }
-      }
-
-      if (successCount > 0) {
-        alert(`Budget updated successfully for ${successCount} campaign(s)${errorCount > 0 ? `. ${errorCount} campaign(s) failed to update.` : ''}`);
-        // Refresh AI data after update
-        await fetchAIData();
-      } else {
-        alert('Failed to update budget for any campaigns');
-      }
+      // Refresh AI data so new goal is reflected everywhere
+      await fetchAIData();
     } catch (error) {
-      console.error('Error updating budget:', error);
-      alert('Failed to update budget: ' + (error.response?.data?.error || error.message));
+      console.error('Error saving daily budget goal:', error);
+      alert('Failed to save daily budget: ' + (error.response?.data?.error || error.message));
     }
   };
 
