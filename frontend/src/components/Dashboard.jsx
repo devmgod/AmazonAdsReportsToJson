@@ -13,7 +13,16 @@ import {
   updateCampaign,
   createAmazonAdsReport,
   getAmazonAdsReport,
-  getAmazonAdsReportJSON
+  getAmazonAdsReportJSON,
+  setUserGoal,
+  getUserGoals,
+  addASIN,
+  findSimilarASINs,
+  createCampaignForASIN,
+  promoteKeywords,
+  addNegativeKeywords,
+  getConvertingTerms,
+  getDayPartingPatterns
 } from '../services/api';
 import Navigation from './Navigation';
 import ApiStatusCards from './ApiStatusCards';
@@ -38,6 +47,8 @@ function Dashboard() {
   const [campaignsPage, setCampaignsPage] = useState(1);
   const [ordersPage, setOrdersPage] = useState(1);
   const [inventoryPage, setInventoryPage] = useState(1);
+  const [detectedChangesPage, setDetectedChangesPage] = useState(1);
+  const [recommendedActionsPage, setRecommendedActionsPage] = useState(1);
   const itemsPerPage = 10;
 
   // GestãoAds state
@@ -45,6 +56,7 @@ function Dashboard() {
   const [maxBidValue, setMaxBidValue] = useState('');
   const [goalType, setGoalType] = useState(''); // 'TACoS', 'ACoS', 'CPC', 'Conversions', 'ROAS'
   const [targetValue, setTargetValue] = useState('');
+  const [userGoals, setUserGoals] = useState(null);
   const [aiDetectedChanges, setAiDetectedChanges] = useState([]);
   const [recommendedActions, setRecommendedActions] = useState([]);
   const [optimizationMetrics, setOptimizationMetrics] = useState({ campaignsOptimized: 0 });
@@ -52,6 +64,20 @@ function Dashboard() {
   const [decisionLog, setDecisionLog] = useState([]);
   const [aiMode, setAiMode] = useState('analytical'); // 'analytical' or 'execution'
   const [decisionLogPage, setDecisionLogPage] = useState(1);
+  
+  // New AI features state
+  const [newASIN, setNewASIN] = useState({
+    asin: '',
+    title: '',
+    category: '',
+    brand: '',
+    features: '',
+    keywords: ''
+  });
+  const [similarASINs, setSimilarASINs] = useState([]);
+  const [keywordSuggestions, setKeywordSuggestions] = useState([]);
+  const [selectedCampaign, setSelectedCampaign] = useState('');
+  const [convertingTerms, setConvertingTerms] = useState([]);
   
   // API call states
   const [apiLoading, setApiLoading] = useState({
@@ -154,35 +180,94 @@ function Dashboard() {
     
     try {
       // Fetch AI detected changes
-      const changesResponse = await getAIDetectedChanges({ 
-        confidence: confidenceFilter === 'all' ? 'all' : confidenceFilter,
-        limit: 100 
-      });
-      setAiDetectedChanges(changesResponse.changes || []);
+      try {
+        const changesResponse = await getAIDetectedChanges({ 
+          confidence: confidenceFilter === 'all' ? 'all' : confidenceFilter,
+          limit: 100 
+        });
+        // Handle both array and object response formats
+        const changes = Array.isArray(changesResponse) 
+          ? changesResponse 
+          : (changesResponse.changes || changesResponse.data || []);
+        setAiDetectedChanges(changes);
+        console.log('AI Detected Changes:', changes.length);
+      } catch (error) {
+        console.error('Error fetching AI detected changes:', error);
+        setAiDetectedChanges([]);
+      }
 
       // Fetch recommended actions
-      const actionsResponse = await getRecommendedActions({ limit: 100 });
-      setRecommendedActions(actionsResponse.actions || []);
+      try {
+        const actionsResponse = await getRecommendedActions({ limit: 100 });
+        // Handle both array and object response formats
+        const actions = Array.isArray(actionsResponse) 
+          ? actionsResponse 
+          : (actionsResponse.actions || actionsResponse.data || []);
+        setRecommendedActions(actions);
+        console.log('Recommended Actions:', actions.length);
+      } catch (error) {
+        console.error('Error fetching recommended actions:', error);
+        setRecommendedActions([]);
+      }
 
       // Fetch decision log
-      const logResponse = await getAIDecisionLog({ limit: 100 });
-      // Map database field names to frontend field names
-      const mappedDecisions = (logResponse.decisions || []).map(decision => ({
-        timestamp: decision.timestamp,
-        campaignId: decision.campaign_id,
-        campaignName: decision.campaign_name,
-        actionType: decision.action_type,
-        whatChanged: decision.what_changed,
-        reason: decision.reason,
-        status: decision.status
-      }));
-      setDecisionLog(mappedDecisions);
+      try {
+        const logResponse = await getAIDecisionLog({ limit: 100 });
+        // Map database field names to frontend field names
+        const decisions = logResponse.decisions || logResponse.data || [];
+        const mappedDecisions = decisions.map(decision => ({
+          timestamp: decision.timestamp,
+          campaignId: decision.campaign_id || decision.campaignId,
+          campaignName: decision.campaign_name || decision.campaignName,
+          actionType: decision.action_type || decision.actionType,
+          whatChanged: decision.what_changed || decision.whatChanged,
+          reason: decision.reason,
+          status: decision.status,
+          confidence: decision.confidence,
+          confidencePercent: decision.confidence_percent || decision.confidencePercent
+        }));
+        setDecisionLog(mappedDecisions);
+        console.log('Decision Log:', mappedDecisions.length);
+      } catch (error) {
+        console.error('Error fetching decision log:', error);
+        setDecisionLog([]);
+      }
 
       // Fetch optimization metrics
-      const metricsResponse = await getOptimizationMetrics();
-      setOptimizationMetrics(metricsResponse || { campaignsOptimized: 0 });
+      try {
+        const metricsResponse = await getOptimizationMetrics();
+        setOptimizationMetrics(metricsResponse || { campaignsOptimized: 0 });
+        console.log('Optimization Metrics:', metricsResponse);
+      } catch (error) {
+        console.error('Error fetching optimization metrics:', error);
+        setOptimizationMetrics({ campaignsOptimized: 0 });
+      }
+      
+      // Fetch user goals
+      try {
+        const goalsResponse = await getUserGoals();
+        const goals = goalsResponse.goals || goalsResponse.data || [];
+        if (goals.length > 0) {
+          const goal = goals[0];
+          setUserGoals(goal);
+          setGoalType(goal.goal_type || goal.goalType || '');
+          setTargetValue(goal.target_value?.toString() || goal.targetValue?.toString() || '');
+          setDailyBudget(goal.daily_budget?.toString() || goal.dailyBudget?.toString() || '');
+          setMaxBidValue(goal.max_bid?.toString() || goal.maxBid?.toString() || '');
+          console.log('User Goals loaded:', goal);
+        } else {
+          console.log('No user goals found');
+        }
+      } catch (error) {
+        console.error('Error fetching user goals:', error);
+        // Don't set empty values if there's an error, keep existing state
+      }
     } catch (error) {
       console.error('Error fetching AI data:', error);
+      // Set empty arrays to prevent undefined errors
+      setAiDetectedChanges([]);
+      setRecommendedActions([]);
+      setDecisionLog([]);
     }
   };
 
@@ -291,35 +376,31 @@ function Dashboard() {
     try {
       const bidValue = parseFloat(maxBidValue);
       
-      // Get campaigns from state (prioritize dbCampaigns, fallback to data.campaigns)
-      const campaignsToUpdate = dbCampaigns.length > 0 ? dbCampaigns : (data?.campaigns || []);
-      
-      if (campaignsToUpdate.length === 0) {
-        alert('No campaigns available to update');
-        return;
-      }
-
-      let successCount = 0;
-      let errorCount = 0;
-
-      for (const campaign of campaignsToUpdate) {
+      // Save max bid as part of user goals (this is a limit/goal, not a direct campaign update)
+      // If user goals exist, update them; otherwise create new goal
+      if (userGoals || goalType) {
         try {
-          // Note: Bid updates may need different structure depending on API requirements
-          await updateCampaign(campaign.campaignId, { bidding: { strategy: 'legacyForSales', adjustments: [] } });
-          successCount++;
+          await setUserGoal({
+            goalType: goalType || userGoals?.goal_type || 'ROAS',
+            targetValue: targetValue ? parseFloat(targetValue) : userGoals?.target_value || null,
+            dailyBudget: dailyBudget ? parseFloat(dailyBudget) : userGoals?.daily_budget || null,
+            maxBid: bidValue,
+            editFrequencyHours: 24
+          });
+          alert(`Max bid limit set successfully: R$ ${bidValue.toFixed(2)}`);
+          await fetchAIData();
+          return;
         } catch (error) {
-          console.error(`Error updating bid for campaign ${campaign.campaignId}:`, error);
-          errorCount++;
+          console.error('Error saving max bid as user goal:', error);
+          // Fall through to try updating campaigns directly if goal save fails
         }
       }
-
-      if (successCount > 0) {
-        alert(`Max bid value updated successfully for ${successCount} campaign(s)${errorCount > 0 ? `. ${errorCount} campaign(s) failed to update.` : ''}`);
-        // Refresh AI data after update
-        await fetchAIData();
-      } else {
-        alert('Failed to update max bid value for any campaigns');
-      }
+      
+      // Alternative: If user wants to update campaigns directly (not recommended)
+      // Note: Max bid is typically a limit/goal, not something you set on campaigns
+      // Campaign bids are set at keyword/ad group level, not campaign level
+      alert('Max bid has been saved as a user goal/limit. The AI will respect this limit when making bid adjustments.\n\nNote: Max bid is a limit/goal, not a direct campaign setting. Campaign bids are managed at the keyword/ad group level.');
+      
     } catch (error) {
       console.error('Error updating bid:', error);
       alert('Failed to update bid: ' + (error.response?.data?.error || error.message));
@@ -329,13 +410,25 @@ function Dashboard() {
   // Trigger AI analysis
   const handleAnalyze = async () => {
     try {
+      // Show loading state
       const result = await analyzeCampaigns(aiMode);
+      console.log('Analysis result:', result);
+      
       // Refresh AI data after analysis
       await fetchAIData();
-      alert(`Analysis complete! Found ${result.analysis.detectedChanges.length} changes and ${result.analysis.recommendedActions.length} recommended actions.`);
+      
+      const detectedCount = result.analysis?.detectedChanges?.length || 0;
+      const actionsCount = result.analysis?.recommendedActions?.length || 0;
+      
+      if (result.warning) {
+        alert(`Analysis Warning: ${result.warning}\n\nFound ${detectedCount} changes and ${actionsCount} recommended actions.`);
+      } else {
+        alert(`Analysis complete! Found ${detectedCount} changes and ${actionsCount} recommended actions.`);
+      }
     } catch (error) {
       console.error('Error running analysis:', error);
-      alert('Failed to run analysis: ' + (error.response?.data?.error || error.message));
+      const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+      alert('Failed to run analysis: ' + errorMsg);
     }
   };
 
@@ -1646,13 +1739,25 @@ function Dashboard() {
                       disabled={!goalType}
                     />
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         if (!goalType || !targetValue) {
                           alert('Please select a goal type and enter a target value');
                           return;
                         }
-                        // TODO: Save goal configuration to backend
-                        alert(`Goal configured: ${goalType} = ${targetValue}`);
+                        try {
+                          const result = await setUserGoal({
+                            goalType: goalType,
+                            targetValue: parseFloat(targetValue),
+                            dailyBudget: dailyBudget ? parseFloat(dailyBudget) : null,
+                            maxBid: maxBidValue ? parseFloat(maxBidValue) : null,
+                            editFrequencyHours: 24
+                          });
+                          setUserGoals(result.goal);
+                          alert(`Goal configured successfully: ${goalType} = ${targetValue}`);
+                          await fetchAIData();
+                        } catch (error) {
+                          alert('Error: ' + (error.response?.data?.error || error.message));
+                        }
                       }}
                       disabled={!goalType || !targetValue}
                       className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-300 disabled:cursor-not-allowed"
@@ -1721,18 +1826,27 @@ function Dashboard() {
                   <p className="text-sm text-gray-500 mt-1">Amazon Bidding Insights: The AI continuously monitors and learns from changes in Amazon bid behavior</p>
                 </div>
                 <span className="px-3 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
-                  {aiDetectedChanges.length} changes detected
+                  {aiDetectedChanges.filter(change => confidenceFilter === 'all' || change.confidence === confidenceFilter).length} changes detected
+                  {aiDetectedChanges.length > 0 && ` (${aiDetectedChanges.length} total)`}
                 </span>
               </div>
               
               {/* Confidence Filter */}
               <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Filter by Confidence</label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-gray-700">Filter by Confidence</label>
+                  <span className="text-xs text-gray-500">
+                    Showing {Math.min(itemsPerPage, aiDetectedChanges.filter(change => confidenceFilter === 'all' || change.confidence === confidenceFilter).length)} of {aiDetectedChanges.filter(change => confidenceFilter === 'all' || change.confidence === confidenceFilter).length}
+                  </span>
+                </div>
                 <div className="flex space-x-2">
                   {['all', 'high', 'medium', 'low'].map((level) => (
                     <button
                       key={level}
-                      onClick={() => setConfidenceFilter(level)}
+                      onClick={() => {
+                        setConfidenceFilter(level);
+                        setDetectedChangesPage(1); // Reset to first page when filter changes
+                      }}
                       className={`px-4 py-2 rounded-md text-sm font-medium capitalize ${
                         confidenceFilter === level
                           ? 'bg-blue-600 text-white'
@@ -1746,37 +1860,58 @@ function Dashboard() {
               </div>
 
               {/* Changes List */}
-              <div className="space-y-3">
-                {aiDetectedChanges
-                  .filter(change => confidenceFilter === 'all' || change.confidence === confidenceFilter)
-                  .map((change, idx) => (
-                    <div key={idx} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center space-x-2 mb-2">
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                              change.confidence === 'high' ? 'bg-green-100 text-green-800' :
-                              change.confidence === 'medium' ? 'bg-yellow-100 text-yellow-800' :
-                              'bg-gray-100 text-gray-800'
-                            }`}>
-                              {change.confidence.charAt(0).toUpperCase() + change.confidence.slice(1)} Confidence
-                            </span>
-                            <span className="text-xs text-gray-500">
-                              {change.date ? new Date(change.date).toLocaleDateString('pt-BR') : 'N/A'}
-                            </span>
+              {(() => {
+                const filteredChanges = aiDetectedChanges.filter(change => confidenceFilter === 'all' || change.confidence === confidenceFilter);
+                const paginatedChanges = getPaginatedData(filteredChanges, detectedChangesPage, itemsPerPage);
+                const totalChangesPages = getTotalPages(filteredChanges, itemsPerPage);
+                
+                return (
+                  <>
+                    <div className="space-y-3">
+                      {paginatedChanges.map((change, idx) => (
+                        <div key={change.id || idx} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <div className="flex items-center space-x-2 mb-2">
+                                <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                                  change.confidence === 'high' ? 'bg-green-100 text-green-800' :
+                                  change.confidence === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                                  'bg-gray-100 text-gray-800'
+                                }`}>
+                                  {change.confidence ? change.confidence.charAt(0).toUpperCase() + change.confidence.slice(1) : 'Unknown'} Confidence
+                                  {change.confidencePercent !== undefined && ` (${change.confidencePercent}%)`}
+                                </span>
+                                <span className="text-xs text-gray-500">
+                                  {change.date ? new Date(change.date).toLocaleDateString('pt-BR') : 'N/A'}
+                                </span>
+                              </div>
+                              <p className="text-sm text-gray-900 font-medium mb-1">{change.description}</p>
+                              <p className="text-xs text-gray-600">{change.details}</p>
+                              {change.campaignId && (
+                                <p className="text-xs text-gray-500 mt-1">Campaign ID: {change.campaignId}</p>
+                              )}
+                            </div>
                           </div>
-                          <p className="text-sm text-gray-900 font-medium mb-1">{change.description}</p>
-                          <p className="text-xs text-gray-600">{change.details}</p>
                         </div>
-                      </div>
+                      ))}
+                      {filteredChanges.length === 0 && (
+                        <div className="text-center py-8 text-gray-500">
+                          <p>No AI-detected changes found for the selected confidence level. The AI continuously monitors Amazon bid patterns and fluctuations.</p>
+                        </div>
+                      )}
                     </div>
-                  ))}
-                {aiDetectedChanges.filter(change => confidenceFilter === 'all' || change.confidence === confidenceFilter).length === 0 && (
-                  <div className="text-center py-8 text-gray-500">
-                    <p>No AI-detected changes found for the selected confidence level. The AI continuously monitors Amazon bid patterns and fluctuations.</p>
-                  </div>
-                )}
-              </div>
+                    {filteredChanges.length > itemsPerPage && (
+                      <Pagination
+                        currentPage={detectedChangesPage}
+                        totalPages={totalChangesPages}
+                        onPageChange={setDetectedChangesPage}
+                        dataLength={filteredChanges.length}
+                        itemsPerPage={itemsPerPage}
+                      />
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Recommended Actions */}
@@ -1789,47 +1924,78 @@ function Dashboard() {
                   </p>
                 </div>
                 <span className="px-3 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">
-                  {recommendedActions.length} actions planned
+                  {recommendedActions.length} action{recommendedActions.length !== 1 ? 's' : ''} planned
                 </span>
               </div>
 
-              <div className="space-y-3">
-                {recommendedActions.map((action, idx) => (
-                  <div key={idx} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center space-x-2 mb-2">
-                          <span className="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
-                            {action.type}
-                          </span>
-                          <span className="text-xs text-gray-500">
-                            Scheduled: {action.scheduledTime || '3:00 AM'}
-                          </span>
+              {(() => {
+                const paginatedActions = getPaginatedData(recommendedActions, recommendedActionsPage, itemsPerPage);
+                const totalActionsPages = getTotalPages(recommendedActions, itemsPerPage);
+                
+                return (
+                  <>
+                    <div className="space-y-3">
+                      {paginatedActions.map((action, idx) => (
+                        <div key={action.id || idx} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <div className="flex items-center space-x-2 mb-2 flex-wrap">
+                                {action.confidencePercent !== undefined && (
+                                  <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                                    action.confidencePercent >= 85 
+                                      ? 'bg-green-100 text-green-800' 
+                                      : action.confidencePercent >= 70
+                                      ? 'bg-yellow-100 text-yellow-800'
+                                      : 'bg-gray-100 text-gray-800'
+                                  }`}>
+                                    {action.confidencePercent}% confidence
+                                    {action.confidencePercent >= 85 && ' (Auto-execute)'}
+                                  </span>
+                                )}
+                                <span className="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
+                                  {action.type}
+                                </span>
+                                <span className="text-xs text-gray-500">
+                                  Scheduled: {action.scheduledTime || '3:00 AM'}
+                                </span>
+                              </div>
+                              <p className="text-sm text-gray-900 font-medium mb-1">{action.title}</p>
+                              <p className="text-xs text-gray-600 mb-2">{action.description}</p>
+                              <div className="text-xs text-gray-500">
+                                <span className="font-medium">Campaign:</span> {action.campaignName || action.campaignId}
+                              </div>
+                            </div>
+                            <div className="ml-4">
+                              <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                                action.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                                action.status === 'executed' ? 'bg-green-100 text-green-800' :
+                                action.status === 'failed' ? 'bg-red-100 text-red-800' :
+                                'bg-gray-100 text-gray-800'
+                              }`}>
+                                {action.status || 'Pending'}
+                              </span>
+                            </div>
+                          </div>
                         </div>
-                        <p className="text-sm text-gray-900 font-medium mb-1">{action.title}</p>
-                        <p className="text-xs text-gray-600 mb-2">{action.description}</p>
-                        <div className="text-xs text-gray-500">
-                          <span className="font-medium">Campaign:</span> {action.campaignName || action.campaignId}
+                      ))}
+                      {recommendedActions.length === 0 && (
+                        <div className="text-center py-8 text-gray-500">
+                          <p>No recommended actions at this time.</p>
                         </div>
-                      </div>
-                      <div className="ml-4">
-                        <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                          action.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
-                          action.status === 'executed' ? 'bg-green-100 text-green-800' :
-                          'bg-gray-100 text-gray-800'
-                        }`}>
-                          {action.status || 'Pending'}
-                        </span>
-                      </div>
+                      )}
                     </div>
-                  </div>
-                ))}
-                {recommendedActions.length === 0 && (
-                  <div className="text-center py-8 text-gray-500">
-                    <p>No recommended actions at this time.</p>
-                  </div>
-                )}
-              </div>
+                    {recommendedActions.length > itemsPerPage && (
+                      <Pagination
+                        currentPage={recommendedActionsPage}
+                        totalPages={totalActionsPages}
+                        onPageChange={setRecommendedActionsPage}
+                        dataLength={recommendedActions.length}
+                        itemsPerPage={itemsPerPage}
+                      />
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Decision Log */}

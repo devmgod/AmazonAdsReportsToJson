@@ -14,7 +14,9 @@ const dbConfig = process.env.DATABASE_URL
       ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
       max: 20, // Maximum number of clients in the pool
       idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-      connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
+      connectionTimeoutMillis: 10000, // Increased to 10 seconds for timeout issues
+      statement_timeout: 30000, // 30 second statement timeout
+      query_timeout: 30000, // 30 second query timeout
     }
   : {
       host: process.env.DB_HOST || "localhost",
@@ -24,7 +26,9 @@ const dbConfig = process.env.DATABASE_URL
       password: process.env.DB_PASSWORD || "postgres",
       max: 20, // Maximum number of clients in the pool
       idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-      connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
+      connectionTimeoutMillis: 10000, // Increased to 10 seconds for timeout issues
+      statement_timeout: 30000, // 30 second statement timeout
+      query_timeout: 30000, // 30 second query timeout
     };
 
 // Create PostgreSQL connection pool
@@ -1629,6 +1633,8 @@ export async function initializeAIDetectedChangesTable() {
 export async function initializeRecommendedActionsTable() {
   try {
     const client = await pool.connect();
+    
+    // Create table if it doesn't exist
     const createTableQuery = `
       CREATE TABLE IF NOT EXISTS recommended_actions (
         id SERIAL PRIMARY KEY,
@@ -1643,12 +1649,31 @@ export async function initializeRecommendedActionsTable() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         executed_at TIMESTAMP
       );
-      
-      CREATE INDEX IF NOT EXISTS idx_recommended_actions_status ON recommended_actions(status);
-      CREATE INDEX IF NOT EXISTS idx_recommended_actions_campaign_id ON recommended_actions(campaign_id);
-      CREATE INDEX IF NOT EXISTS idx_recommended_actions_created_at ON recommended_actions(created_at);
     `;
     await client.query(createTableQuery);
+    
+    // Check if confidence_percent column exists and add it if missing
+    try {
+      const columnCheck = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'recommended_actions' AND column_name = 'confidence_percent';
+      `);
+      
+      if (columnCheck.rows.length === 0) {
+        await client.query(`ALTER TABLE recommended_actions ADD COLUMN confidence_percent NUMERIC(5, 2);`);
+        console.log("✓ Added confidence_percent column to recommended_actions table");
+      }
+    } catch (error) {
+      // Column might already exist or table might not exist yet
+      console.log("Note: confidence_percent column check:", error.message);
+    }
+    
+    // Create indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_recommended_actions_status ON recommended_actions(status);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_recommended_actions_campaign_id ON recommended_actions(campaign_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_recommended_actions_created_at ON recommended_actions(created_at);`);
+    
     client.release();
     console.log("✓ Recommended Actions table initialized");
     return true;
@@ -1877,12 +1902,44 @@ export async function getRecommendedActions(queryParams = {}) {
 
     const result = await client.query(query, params);
     client.release();
-    return result.rows.map(row => ({
-      ...row,
-      actionData: row.action_data ? JSON.parse(row.action_data) : null
-    }));
+    
+    // Safely parse JSONB fields
+    return result.rows.map(row => {
+      let actionData = null;
+      try {
+        // Handle both JSONB (already parsed) and JSON string formats
+        if (row.action_data) {
+          if (typeof row.action_data === 'string') {
+            actionData = JSON.parse(row.action_data);
+          } else {
+            actionData = row.action_data; // Already parsed JSONB
+          }
+        }
+      } catch (parseError) {
+        console.error("Error parsing action_data:", parseError);
+        actionData = null;
+      }
+      
+      return {
+        id: row.id,
+        type: row.type,
+        title: row.title,
+        description: row.description,
+        campaignId: row.campaign_id,
+        campaignName: row.campaign_name,
+        scheduledTime: row.scheduled_time,
+        status: row.status,
+        actionData: actionData,
+        createdAt: row.created_at,
+        executedAt: row.executed_at,
+        confidencePercent: row.confidence_percent || null,
+        // Include all original fields for backward compatibility
+        ...row
+      };
+    });
   } catch (error) {
     console.error("✗ Failed to get recommended actions:", error.message);
+    console.error("Error stack:", error.stack);
     throw error;
   }
 }
@@ -1908,6 +1965,877 @@ export async function updateRecommendedActionStatus(actionId, status, executedAt
     return result.rows[0];
   } catch (error) {
     console.error("✗ Failed to update recommended action status:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Initialize user goals table
+ * Stores user-defined optimization goals
+ */
+export async function initializeUserGoalsTable() {
+  try {
+    const client = await pool.connect();
+    
+    // Create table if it doesn't exist
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS user_goals (
+        id SERIAL PRIMARY KEY,
+        goal_type VARCHAR(50),
+        target_value NUMERIC(10, 2),
+        daily_budget NUMERIC(10, 2),
+        max_bid NUMERIC(10, 2),
+        edit_frequency_hours INTEGER DEFAULT 24,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+    await client.query(createTableQuery);
+    
+    // Check which columns exist and add missing ones
+    const existingColumnsQuery = `
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'user_goals';
+    `;
+    const existingColumnsResult = await client.query(existingColumnsQuery);
+    const existingColumns = new Set(existingColumnsResult.rows.map(row => row.column_name));
+    
+    const requiredColumns = [
+      { name: 'goal_type', type: 'VARCHAR(50)' },
+      { name: 'target_value', type: 'NUMERIC(10, 2)' },
+      { name: 'daily_budget', type: 'NUMERIC(10, 2)' },
+      { name: 'max_bid', type: 'NUMERIC(10, 2)' },
+      { name: 'edit_frequency_hours', type: 'INTEGER DEFAULT 24' },
+      { name: 'is_active', type: 'BOOLEAN DEFAULT true' },
+      { name: 'created_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' },
+      { name: 'updated_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' }
+    ];
+    
+    let addedCount = 0;
+    for (const column of requiredColumns) {
+      if (!existingColumns.has(column.name)) {
+        try {
+          await client.query(`ALTER TABLE user_goals ADD COLUMN ${column.name} ${column.type};`);
+          console.log(`✓ Added missing column to user_goals: ${column.name}`);
+          addedCount++;
+        } catch (error) {
+          console.error(`✗ Failed to add column ${column.name}:`, error.message);
+        }
+      }
+    }
+    
+    // Add constraint if it doesn't exist
+    try {
+      await client.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint 
+            WHERE conname = 'user_goals_goal_type_check'
+          ) THEN
+            ALTER TABLE user_goals 
+            ADD CONSTRAINT user_goals_goal_type_check 
+            CHECK (goal_type IN ('TACoS', 'ACoS', 'CPC', 'Conversions', 'ROAS'));
+          END IF;
+        END $$;
+      `);
+    } catch (error) {
+      // Constraint might already exist or table might not have goal_type yet
+    }
+    
+    // Create indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_user_goals_goal_type ON user_goals(goal_type);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_user_goals_is_active ON user_goals(is_active);`);
+    
+    client.release();
+    if (addedCount > 0) {
+      console.log(`✓ User Goals table initialized (added ${addedCount} missing columns)`);
+    } else {
+      console.log("✓ User Goals table initialized");
+    }
+    return true;
+  } catch (error) {
+    console.error("✗ Failed to initialize User Goals table:", error.message);
+    return false;
+  }
+}
+
+/**
+ * Initialize ASINs table
+ * Stores ASINs and their metadata for similarity matching
+ */
+export async function initializeASINsTable() {
+  try {
+    const client = await pool.connect();
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS asins (
+        id SERIAL PRIMARY KEY,
+        asin VARCHAR(20) UNIQUE NOT NULL,
+        title TEXT,
+        category VARCHAR(200),
+        brand VARCHAR(200),
+        features JSONB,
+        keywords JSONB,
+        similarity_vector JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_asins_asin ON asins(asin);
+      CREATE INDEX IF NOT EXISTS idx_asins_category ON asins(category);
+    `;
+    await client.query(createTableQuery);
+    client.release();
+    console.log("✓ ASINs table initialized");
+    return true;
+  } catch (error) {
+    console.error("✗ Failed to initialize ASINs table:", error.message);
+    return false;
+  }
+}
+
+/**
+ * Initialize keywords table
+ * Stores keyword performance data and visibility levels
+ */
+export async function initializeKeywordsTable() {
+  try {
+    const client = await pool.connect();
+    
+    // Create table if it doesn't exist (without unique constraint first)
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS keywords (
+        id SERIAL PRIMARY KEY,
+        keyword_text VARCHAR(500) NOT NULL,
+        campaign_id BIGINT,
+        ad_group_id BIGINT,
+        match_type VARCHAR(50),
+        visibility_level VARCHAR(50) DEFAULT 'auto',
+        bid NUMERIC(10, 2),
+        impressions INTEGER DEFAULT 0,
+        clicks INTEGER DEFAULT 0,
+        cost NUMERIC(10, 2) DEFAULT 0,
+        sales14d NUMERIC(10, 2) DEFAULT 0,
+        conversions INTEGER DEFAULT 0,
+        acos NUMERIC(10, 4),
+        roas NUMERIC(10, 4),
+        ctr NUMERIC(10, 4),
+        cpc NUMERIC(10, 2),
+        is_negative BOOLEAN DEFAULT false,
+        is_promoted BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_performance_update TIMESTAMP
+      );
+    `;
+    await client.query(createTableQuery);
+    
+    // Check which columns exist and add missing ones
+    const existingColumnsQuery = `
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'keywords';
+    `;
+    const existingColumnsResult = await client.query(existingColumnsQuery);
+    const existingColumns = new Set(existingColumnsResult.rows.map(row => row.column_name));
+    
+    const requiredColumns = [
+      { name: 'keyword_text', type: 'VARCHAR(500) NOT NULL' },
+      { name: 'campaign_id', type: 'BIGINT' },
+      { name: 'ad_group_id', type: 'BIGINT' },
+      { name: 'match_type', type: 'VARCHAR(50)' },
+      { name: 'visibility_level', type: "VARCHAR(50) DEFAULT 'auto'" },
+      { name: 'bid', type: 'NUMERIC(10, 2)' },
+      { name: 'impressions', type: 'INTEGER DEFAULT 0' },
+      { name: 'clicks', type: 'INTEGER DEFAULT 0' },
+      { name: 'cost', type: 'NUMERIC(10, 2) DEFAULT 0' },
+      { name: 'sales14d', type: 'NUMERIC(10, 2) DEFAULT 0' },
+      { name: 'conversions', type: 'INTEGER DEFAULT 0' },
+      { name: 'acos', type: 'NUMERIC(10, 4)' },
+      { name: 'roas', type: 'NUMERIC(10, 4)' },
+      { name: 'ctr', type: 'NUMERIC(10, 4)' },
+      { name: 'cpc', type: 'NUMERIC(10, 2)' },
+      { name: 'is_negative', type: 'BOOLEAN DEFAULT false' },
+      { name: 'is_promoted', type: 'BOOLEAN DEFAULT false' },
+      { name: 'created_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' },
+      { name: 'updated_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' },
+      { name: 'last_performance_update', type: 'TIMESTAMP' }
+    ];
+    
+    let addedCount = 0;
+    for (const column of requiredColumns) {
+      if (!existingColumns.has(column.name)) {
+        try {
+          // Remove NOT NULL constraint for existing tables
+          const alterType = column.type.replace(' NOT NULL', '');
+          await client.query(`ALTER TABLE keywords ADD COLUMN ${column.name} ${alterType};`);
+          console.log(`✓ Added missing column to keywords: ${column.name}`);
+          addedCount++;
+        } catch (error) {
+          console.error(`✗ Failed to add column ${column.name}:`, error.message);
+        }
+      }
+    }
+    
+    // Add unique constraint if it doesn't exist
+    try {
+      await client.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint 
+            WHERE conname = 'keywords_keyword_text_campaign_id_key'
+          ) THEN
+            ALTER TABLE keywords 
+            ADD CONSTRAINT keywords_keyword_text_campaign_id_key 
+            UNIQUE (keyword_text, campaign_id);
+          END IF;
+        END $$;
+      `);
+    } catch (error) {
+      // Constraint might already exist
+    }
+    
+    // Create indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_keywords_keyword_text ON keywords(keyword_text);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_keywords_campaign_id ON keywords(campaign_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_keywords_visibility_level ON keywords(visibility_level);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_keywords_is_negative ON keywords(is_negative);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_keywords_is_promoted ON keywords(is_promoted);`);
+    
+    client.release();
+    if (addedCount > 0) {
+      console.log(`✓ Keywords table initialized (added ${addedCount} missing columns)`);
+    } else {
+      console.log("✓ Keywords table initialized");
+    }
+    return true;
+  } catch (error) {
+    console.error("✗ Failed to initialize Keywords table:", error.message);
+    return false;
+  }
+}
+
+/**
+ * Initialize day parting patterns table
+ * Stores time-based performance patterns for bid adjustments
+ */
+export async function initializeDayPartingPatternsTable() {
+  try {
+    const client = await pool.connect();
+    
+    // Create table if it doesn't exist (without unique constraint first)
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS day_parting_patterns (
+        id SERIAL PRIMARY KEY,
+        campaign_id BIGINT,
+        keyword_id INTEGER,
+        day_of_week INTEGER,
+        hour_of_day INTEGER,
+        conversion_rate NUMERIC(10, 4),
+        avg_roas NUMERIC(10, 4),
+        avg_acos NUMERIC(10, 4),
+        bid_adjustment_percent NUMERIC(5, 2) DEFAULT 0,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+    await client.query(createTableQuery);
+    
+    // Check which columns exist and add missing ones
+    const existingColumnsQuery = `
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'day_parting_patterns';
+    `;
+    const existingColumnsResult = await client.query(existingColumnsQuery);
+    const existingColumns = new Set(existingColumnsResult.rows.map(row => row.column_name));
+    
+    const requiredColumns = [
+      { name: 'campaign_id', type: 'BIGINT' },
+      { name: 'keyword_id', type: 'INTEGER' },
+      { name: 'day_of_week', type: 'INTEGER' },
+      { name: 'hour_of_day', type: 'INTEGER' },
+      { name: 'conversion_rate', type: 'NUMERIC(10, 4)' },
+      { name: 'avg_roas', type: 'NUMERIC(10, 4)' },
+      { name: 'avg_acos', type: 'NUMERIC(10, 4)' },
+      { name: 'bid_adjustment_percent', type: 'NUMERIC(5, 2) DEFAULT 0' },
+      { name: 'is_active', type: 'BOOLEAN DEFAULT true' },
+      { name: 'created_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' },
+      { name: 'updated_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' }
+    ];
+    
+    let addedCount = 0;
+    for (const column of requiredColumns) {
+      if (!existingColumns.has(column.name)) {
+        try {
+          await client.query(`ALTER TABLE day_parting_patterns ADD COLUMN ${column.name} ${column.type};`);
+          console.log(`✓ Added missing column to day_parting_patterns: ${column.name}`);
+          addedCount++;
+        } catch (error) {
+          console.error(`✗ Failed to add column ${column.name}:`, error.message);
+        }
+      }
+    }
+    
+    // Add check constraints if they don't exist
+    try {
+      await client.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint 
+            WHERE conname = 'day_parting_patterns_day_of_week_check'
+          ) THEN
+            ALTER TABLE day_parting_patterns 
+            ADD CONSTRAINT day_parting_patterns_day_of_week_check 
+            CHECK (day_of_week >= 0 AND day_of_week <= 6);
+          END IF;
+        END $$;
+      `);
+      
+      await client.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint 
+            WHERE conname = 'day_parting_patterns_hour_of_day_check'
+          ) THEN
+            ALTER TABLE day_parting_patterns 
+            ADD CONSTRAINT day_parting_patterns_hour_of_day_check 
+            CHECK (hour_of_day >= 0 AND hour_of_day <= 23);
+          END IF;
+        END $$;
+      `);
+    } catch (error) {
+      // Constraints might already exist
+    }
+    
+    // Add unique constraint if it doesn't exist
+    try {
+      await client.query(`
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint 
+            WHERE conname = 'day_parting_patterns_campaign_id_keyword_id_day_of_week_hour_of_day_key'
+          ) THEN
+            ALTER TABLE day_parting_patterns 
+            ADD CONSTRAINT day_parting_patterns_campaign_id_keyword_id_day_of_week_hour_of_day_key 
+            UNIQUE (campaign_id, keyword_id, day_of_week, hour_of_day);
+          END IF;
+        END $$;
+      `);
+    } catch (error) {
+      // Constraint might already exist
+    }
+    
+    // Create indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_day_parting_campaign_id ON day_parting_patterns(campaign_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_day_parting_keyword_id ON day_parting_patterns(keyword_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_day_parting_day_hour ON day_parting_patterns(day_of_week, hour_of_day);`);
+    
+    client.release();
+    if (addedCount > 0) {
+      console.log(`✓ Day Parting Patterns table initialized (added ${addedCount} missing columns)`);
+    } else {
+      console.log("✓ Day Parting Patterns table initialized");
+    }
+    return true;
+  } catch (error) {
+    console.error("✗ Failed to initialize Day Parting Patterns table:", error.message);
+    return false;
+  }
+}
+
+/**
+ * Initialize performance learning table
+ * Stores decision outcomes and learning data
+ */
+export async function initializePerformanceLearningTable() {
+  try {
+    const client = await pool.connect();
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS performance_learning (
+        id SERIAL PRIMARY KEY,
+        decision_id INTEGER REFERENCES ai_decision_log(id),
+        campaign_id BIGINT,
+        keyword_id INTEGER,
+        action_type VARCHAR(100),
+        before_metrics JSONB,
+        after_metrics JSONB,
+        outcome_score NUMERIC(10, 4),
+        conversion_result BOOLEAN,
+        sales_change_percent NUMERIC(10, 4),
+        roas_change_percent NUMERIC(10, 4),
+        acos_change_percent NUMERIC(10, 4),
+        learning_notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        evaluated_at TIMESTAMP
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_performance_learning_decision_id ON performance_learning(decision_id);
+      CREATE INDEX IF NOT EXISTS idx_performance_learning_campaign_id ON performance_learning(campaign_id);
+      CREATE INDEX IF NOT EXISTS idx_performance_learning_outcome_score ON performance_learning(outcome_score);
+    `;
+    await client.query(createTableQuery);
+    client.release();
+    console.log("✓ Performance Learning table initialized");
+    return true;
+  } catch (error) {
+    console.error("✗ Failed to initialize Performance Learning table:", error.message);
+    return false;
+  }
+}
+
+/**
+ * Store or update user goal
+ */
+export async function storeUserGoal(goal) {
+  try {
+    // Validate input
+    if (!goal || typeof goal !== 'object') {
+      throw new Error("Goal object is required");
+    }
+    
+    const client = await pool.connect();
+    
+    // Check if a goal already exists
+    const existingGoalQuery = `SELECT id FROM user_goals WHERE is_active = true LIMIT 1`;
+    const existingResult = await client.query(existingGoalQuery);
+    
+    if (existingResult.rows.length > 0) {
+      // Update existing goal
+      const updateQuery = `
+        UPDATE user_goals 
+        SET 
+          goal_type = $1,
+          target_value = $2,
+          daily_budget = $3,
+          max_bid = $4,
+          edit_frequency_hours = $5,
+          is_active = $6,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $7
+        RETURNING *;
+      `;
+      const result = await client.query(updateQuery, [
+        goal.goalType || null,
+        goal.targetValue || null,
+        goal.dailyBudget || null,
+        goal.maxBid || null,
+        goal.editFrequencyHours || 24,
+        goal.isActive !== undefined ? goal.isActive : true,
+        existingResult.rows[0].id
+      ]);
+      client.release();
+      return result.rows[0];
+    } else {
+      // Insert new goal
+      const insertQuery = `
+        INSERT INTO user_goals (goal_type, target_value, daily_budget, max_bid, edit_frequency_hours, is_active, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+        RETURNING *;
+      `;
+      const result = await client.query(insertQuery, [
+        goal.goalType || null,
+        goal.targetValue || null,
+        goal.dailyBudget || null,
+        goal.maxBid || null,
+        goal.editFrequencyHours || 24,
+        goal.isActive !== undefined ? goal.isActive : true
+      ]);
+      client.release();
+      return result.rows[0];
+    }
+  } catch (error) {
+    console.error("✗ Failed to store user goal:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Get active user goals
+ */
+export async function getUserGoals() {
+  try {
+    const client = await pool.connect();
+    const query = `SELECT * FROM user_goals WHERE is_active = true ORDER BY updated_at DESC`;
+    const result = await client.query(query);
+    client.release();
+    return result.rows;
+  } catch (error) {
+    console.error("✗ Failed to get user goals:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Store or update ASIN
+ */
+export async function storeASIN(asinData) {
+  try {
+    const client = await pool.connect();
+    const upsertQuery = `
+      INSERT INTO asins (asin, title, category, brand, features, keywords, similarity_vector, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+      ON CONFLICT (asin) 
+      DO UPDATE SET
+        title = EXCLUDED.title,
+        category = EXCLUDED.category,
+        brand = EXCLUDED.brand,
+        features = EXCLUDED.features,
+        keywords = EXCLUDED.keywords,
+        similarity_vector = EXCLUDED.similarity_vector,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *;
+    `;
+    const result = await client.query(upsertQuery, [
+      asinData.asin,
+      asinData.title,
+      asinData.category,
+      asinData.brand,
+      JSON.stringify(asinData.features || []),
+      JSON.stringify(asinData.keywords || []),
+      JSON.stringify(asinData.similarityVector || {})
+    ]);
+    client.release();
+    return result.rows[0];
+  } catch (error) {
+    console.error("✗ Failed to store ASIN:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Find similar ASINs (≥85% similarity)
+ */
+export async function findSimilarASINs(targetASIN, similarityThreshold = 0.85) {
+  try {
+    const client = await pool.connect();
+    // Get target ASIN data
+    const targetResult = await client.query(`SELECT * FROM asins WHERE asin = $1`, [targetASIN]);
+    if (targetResult.rows.length === 0) {
+      client.release();
+      return [];
+    }
+    
+    const target = targetResult.rows[0];
+    const targetVector = target.similarity_vector || {};
+    
+    // Get all other ASINs and calculate similarity
+    const allASINs = await client.query(`SELECT * FROM asins WHERE asin != $1`, [targetASIN]);
+    const similarASINs = [];
+    
+    for (const asin of allASINs.rows) {
+      const similarity = calculateASINSimilarity(target, asin);
+      if (similarity >= similarityThreshold) {
+        similarASINs.push({
+          ...asin,
+          similarity: similarity
+        });
+      }
+    }
+    
+    client.release();
+    return similarASINs.sort((a, b) => b.similarity - a.similarity);
+  } catch (error) {
+    console.error("✗ Failed to find similar ASINs:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Calculate ASIN similarity (0-1 scale)
+ */
+function calculateASINSimilarity(asin1, asin2) {
+  let similarity = 0;
+  let factors = 0;
+  
+  // Category match (30% weight)
+  if (asin1.category && asin2.category) {
+    if (asin1.category === asin2.category) {
+      similarity += 0.3;
+    }
+    factors += 0.3;
+  }
+  
+  // Brand match (20% weight)
+  if (asin1.brand && asin2.brand) {
+    if (asin1.brand.toLowerCase() === asin2.brand.toLowerCase()) {
+      similarity += 0.2;
+    }
+    factors += 0.2;
+  }
+  
+  // Title similarity (30% weight)
+  if (asin1.title && asin2.title) {
+    const titleSim = calculateTextSimilarity(asin1.title, asin2.title);
+    similarity += titleSim * 0.3;
+    factors += 0.3;
+  }
+  
+  // Keywords overlap (20% weight)
+  const keywords1 = asin1.keywords || [];
+  const keywords2 = asin2.keywords || [];
+  if (keywords1.length > 0 && keywords2.length > 0) {
+    const overlap = calculateArrayOverlap(keywords1, keywords2);
+    similarity += overlap * 0.2;
+    factors += 0.2;
+  }
+  
+  return factors > 0 ? similarity / factors : 0;
+}
+
+/**
+ * Calculate text similarity using simple word overlap
+ */
+function calculateTextSimilarity(text1, text2) {
+  const words1 = new Set(text1.toLowerCase().split(/\s+/));
+  const words2 = new Set(text2.toLowerCase().split(/\s+/));
+  const intersection = new Set([...words1].filter(x => words2.has(x)));
+  const union = new Set([...words1, ...words2]);
+  return union.size > 0 ? intersection.size / union.size : 0;
+}
+
+/**
+ * Calculate array overlap
+ */
+function calculateArrayOverlap(arr1, arr2) {
+  const set1 = new Set(arr1.map(x => x.toLowerCase()));
+  const set2 = new Set(arr2.map(x => x.toLowerCase()));
+  const intersection = new Set([...set1].filter(x => set2.has(x)));
+  const union = new Set([...set1, ...set2]);
+  return union.size > 0 ? intersection.size / union.size : 0;
+}
+
+/**
+ * Store or update keyword performance
+ */
+export async function storeKeyword(keywordData) {
+  try {
+    const client = await pool.connect();
+    const upsertQuery = `
+      INSERT INTO keywords (
+        keyword_text, campaign_id, ad_group_id, match_type, visibility_level,
+        bid, impressions, clicks, cost, sales14d, conversions, acos, roas, ctr, cpc,
+        is_negative, is_promoted, updated_at, last_performance_update
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT (keyword_text, campaign_id) 
+      DO UPDATE SET
+        ad_group_id = EXCLUDED.ad_group_id,
+        match_type = EXCLUDED.match_type,
+        visibility_level = EXCLUDED.visibility_level,
+        bid = EXCLUDED.bid,
+        impressions = EXCLUDED.impressions,
+        clicks = EXCLUDED.clicks,
+        cost = EXCLUDED.cost,
+        sales14d = EXCLUDED.sales14d,
+        conversions = EXCLUDED.conversions,
+        acos = EXCLUDED.acos,
+        roas = EXCLUDED.roas,
+        ctr = EXCLUDED.ctr,
+        cpc = EXCLUDED.cpc,
+        is_negative = EXCLUDED.is_negative,
+        is_promoted = EXCLUDED.is_promoted,
+        updated_at = CURRENT_TIMESTAMP,
+        last_performance_update = CURRENT_TIMESTAMP
+      RETURNING *;
+    `;
+    const result = await client.query(upsertQuery, [
+      keywordData.keywordText,
+      keywordData.campaignId,
+      keywordData.adGroupId,
+      keywordData.matchType,
+      keywordData.visibilityLevel || 'auto',
+      keywordData.bid,
+      keywordData.impressions || 0,
+      keywordData.clicks || 0,
+      keywordData.cost || 0,
+      keywordData.sales14d || 0,
+      keywordData.conversions || 0,
+      keywordData.acos,
+      keywordData.roas,
+      keywordData.ctr,
+      keywordData.cpc,
+      keywordData.isNegative || false,
+      keywordData.isPromoted || false
+    ]);
+    client.release();
+    return result.rows[0];
+  } catch (error) {
+    console.error("✗ Failed to store keyword:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Get keywords by campaign
+ */
+export async function getKeywordsByCampaign(campaignId) {
+  try {
+    const client = await pool.connect();
+    const query = `SELECT * FROM keywords WHERE campaign_id = $1 ORDER BY sales14d DESC`;
+    const result = await client.query(query, [campaignId]);
+    client.release();
+    return result.rows;
+  } catch (error) {
+    console.error("✗ Failed to get keywords:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Store day parting pattern
+ */
+export async function storeDayPartingPattern(pattern) {
+  let client;
+  try {
+    client = await pool.connect();
+    
+    // Check for existing record first (handles NULL keyword_id properly)
+    const checkQuery = `
+      SELECT id FROM day_parting_patterns 
+      WHERE campaign_id = $1 
+        AND (keyword_id = $2 OR (keyword_id IS NULL AND $2 IS NULL))
+        AND day_of_week = $3 
+        AND hour_of_day = $4
+      LIMIT 1;
+    `;
+    const existing = await client.query(checkQuery, [
+      pattern.campaignId,
+      pattern.keywordId || null,
+      pattern.dayOfWeek,
+      pattern.hourOfDay
+    ]);
+    
+    if (existing.rows.length > 0) {
+      // Update existing record
+      const updateQuery = `
+        UPDATE day_parting_patterns 
+        SET conversion_rate = $1,
+            avg_roas = $2,
+            avg_acos = $3,
+            bid_adjustment_percent = $4,
+            is_active = $5,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $6
+        RETURNING *;
+      `;
+      const result = await client.query(updateQuery, [
+        pattern.conversionRate,
+        pattern.avgRoas,
+        pattern.avgAcos,
+        pattern.bidAdjustmentPercent || 0,
+        pattern.isActive !== undefined ? pattern.isActive : true,
+        existing.rows[0].id
+      ]);
+      client.release();
+      return result.rows[0];
+    } else {
+      // Insert new record
+      const insertQuery = `
+        INSERT INTO day_parting_patterns (
+          campaign_id, keyword_id, day_of_week, hour_of_day,
+          conversion_rate, avg_roas, avg_acos, bid_adjustment_percent, is_active, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+        RETURNING *;
+      `;
+      const result = await client.query(insertQuery, [
+        pattern.campaignId,
+        pattern.keywordId || null,
+        pattern.dayOfWeek,
+        pattern.hourOfDay,
+        pattern.conversionRate,
+        pattern.avgRoas,
+        pattern.avgAcos,
+        pattern.bidAdjustmentPercent || 0,
+        pattern.isActive !== undefined ? pattern.isActive : true
+      ]);
+      client.release();
+      return result.rows[0];
+    }
+  } catch (error) {
+    if (client) {
+      client.release();
+    }
+    // Don't throw error for duplicate key - it's expected behavior
+    if (error.message && error.message.includes('duplicate key')) {
+      // Silently ignore duplicate key errors - pattern already exists
+      return null;
+    }
+    // Log other errors but don't throw - we don't want to break the analysis
+    if (!error.message || !error.message.includes('timeout')) {
+      console.error("✗ Failed to store day parting pattern:", error.message);
+    }
+    // Return null instead of throwing to prevent breaking the analysis loop
+    return null;
+  }
+}
+
+/**
+ * Get day parting patterns for campaign/keyword
+ */
+export async function getDayPartingPatterns(campaignId, keywordId = null) {
+  try {
+    const client = await pool.connect();
+    let query = `SELECT * FROM day_parting_patterns WHERE campaign_id = $1 AND is_active = true`;
+    const params = [campaignId];
+    
+    if (keywordId) {
+      query += ` AND keyword_id = $2`;
+      params.push(keywordId);
+    }
+    
+    query += ` ORDER BY day_of_week, hour_of_day`;
+    const result = await client.query(query, params);
+    client.release();
+    return result.rows;
+  } catch (error) {
+    console.error("✗ Failed to get day parting patterns:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Store performance learning outcome
+ */
+export async function storePerformanceLearning(learningData) {
+  try {
+    const client = await pool.connect();
+    const insertQuery = `
+      INSERT INTO performance_learning (
+        decision_id, campaign_id, keyword_id, action_type,
+        before_metrics, after_metrics, outcome_score, conversion_result,
+        sales_change_percent, roas_change_percent, acos_change_percent,
+        learning_notes, evaluated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
+      RETURNING *;
+    `;
+    const result = await client.query(insertQuery, [
+      learningData.decisionId,
+      learningData.campaignId,
+      learningData.keywordId,
+      learningData.actionType,
+      JSON.stringify(learningData.beforeMetrics || {}),
+      JSON.stringify(learningData.afterMetrics || {}),
+      learningData.outcomeScore,
+      learningData.conversionResult,
+      learningData.salesChangePercent,
+      learningData.roasChangePercent,
+      learningData.acosChangePercent,
+      learningData.learningNotes
+    ]);
+    client.release();
+    return result.rows[0];
+  } catch (error) {
+    console.error("✗ Failed to store performance learning:", error.message);
     throw error;
   }
 }

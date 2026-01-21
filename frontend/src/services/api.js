@@ -90,7 +90,10 @@ export const getReportsSummaryFromDatabase = async (queryParams = {}) => {
 
 // AI Analysis
 export const analyzeCampaigns = async (aiMode = 'analytical') => {
-  const response = await api.post('/ai/analyze', null, { params: { aiMode } });
+  // Send aiMode in request body instead of query params for POST request
+  const response = await api.post('/ai/analyze', { aiMode }, {
+    params: { aiMode } // Also include in query params for backward compatibility
+  });
   return response.data;
 };
 
@@ -130,6 +133,62 @@ export const updateCampaign = async (campaignId, updates) => {
 // Get Optimization Metrics
 export const getOptimizationMetrics = async () => {
   const response = await api.get('/ai/optimization-metrics');
+  return response.data;
+};
+
+// User Goals
+export const setUserGoal = async (goalData) => {
+  const response = await api.post('/ai/user-goals', goalData);
+  return response.data;
+};
+
+export const getUserGoals = async () => {
+  const response = await api.get('/ai/user-goals');
+  return response.data;
+};
+
+// ASINs
+export const addASIN = async (asinData) => {
+  const response = await api.post('/ai/asins', asinData);
+  return response.data;
+};
+
+export const findSimilarASINs = async (asin, threshold = 0.85) => {
+  const response = await api.get(`/ai/asins/${asin}/similar`, {
+    params: { threshold }
+  });
+  return response.data;
+};
+
+// Campaign Creation for ASINs
+export const createCampaignForASIN = async (campaignData) => {
+  const response = await api.post('/ai/campaigns/create-for-asin', campaignData);
+  return response.data;
+};
+
+// Keywords
+export const promoteKeywords = async (promotionData) => {
+  const response = await api.post('/ai/keywords/promote', promotionData);
+  return response.data;
+};
+
+export const addNegativeKeywords = async (negativeData) => {
+  const response = await api.post('/ai/keywords/negative', negativeData);
+  return response.data;
+};
+
+export const getConvertingTerms = async (campaignId, options = {}) => {
+  const response = await api.get(`/ai/keywords/converting-terms/${campaignId}`, {
+    params: options
+  });
+  return response.data;
+};
+
+// Day Parting
+export const getDayPartingPatterns = async (campaignId, keywordId = null) => {
+  const response = await api.get(`/ai/day-parting/${campaignId}`, {
+    params: keywordId ? { keywordId } : {}
+  });
   return response.data;
 };
 

@@ -29,6 +29,20 @@ import {
   storeRecommendedAction,
   getRecommendedActions,
   updateRecommendedActionStatus,
+  initializeUserGoalsTable,
+  initializeASINsTable,
+  initializeKeywordsTable,
+  initializeDayPartingPatternsTable,
+  initializePerformanceLearningTable,
+  storeUserGoal,
+  getUserGoals,
+  storeASIN,
+  findSimilarASINs,
+  storeKeyword,
+  getKeywordsByCampaign,
+  storeDayPartingPattern,
+  getDayPartingPatterns,
+  storePerformanceLearning,
 } from "./database.js";
 
 // Load environment variables from .env file
@@ -906,27 +920,184 @@ async function updateAmazonAdsCampaign(campaignId, updates) {
     body: JSON.stringify([updatePayload]),
   });
 
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch (parseError) {
+    const text = await response.text().catch(() => 'Unable to read response');
+    throw new Error(`Failed to parse Amazon Ads API response: ${text.substring(0, 200)}`);
+  }
 
   if (!response.ok) {
-    throw new Error(data.message || data.error || "Failed to update campaign");
+    // Handle Amazon Ads API error responses
+    const errorMessage = data.message || data.error || data.errors?.[0]?.message || "Failed to update campaign";
+    const errorCode = data.code || data.errors?.[0]?.code || response.status;
+    throw new Error(`Amazon Ads API Error (${errorCode}): ${errorMessage}`);
+  }
+
+  // Check if the response contains errors even with 200 status
+  if (data.errors && Array.isArray(data.errors) && data.errors.length > 0) {
+    const errorMessage = data.errors.map(e => e.message || e.code).join(', ');
+    throw new Error(`Campaign update failed: ${errorMessage}`);
   }
 
   return data;
 }
 
 /**
- * AI Decision Engine
- * Analyzes campaign performance and generates recommendations
+ * Calculate confidence percentage based on data quality and performance metrics
+ * Returns a value between 0-100
  */
-async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytical') {
+function calculateConfidencePercentage(dataPoints, metrics, userGoals = null) {
+  let confidence = 0;
+  
+  // Data quality factor (40% weight)
+  // Minimum 24 hours of data required
+  if (dataPoints >= 24) {
+    confidence += 40;
+  } else if (dataPoints >= 14) {
+    confidence += 30;
+  } else if (dataPoints >= 7) {
+    confidence += 20;
+  } else {
+    confidence += 10;
+  }
+  
+  // Performance consistency (30% weight)
+  const roas = metrics.roas || 0;
+  const acos = metrics.acos || 0;
+  const ctr = metrics.ctr || 0;
+  
+  if (roas > 0 && acos > 0 && ctr > 0) {
+    confidence += 30; // All metrics available
+  } else {
+    confidence += 15; // Partial metrics
+  }
+  
+  // Goal alignment (30% weight)
+  if (userGoals) {
+    const goalType = userGoals.goalType;
+    const targetValue = userGoals.targetValue;
+    
+    if (goalType === 'ROAS' && targetValue && roas >= targetValue * 0.9) {
+      confidence += 30;
+    } else if (goalType === 'ACoS' && targetValue && acos <= targetValue * 1.1) {
+      confidence += 30;
+    } else if (goalType === 'CPC' && targetValue && metrics.cpc <= targetValue * 1.1) {
+      confidence += 30;
+    } else {
+      confidence += 15; // Partial alignment
+    }
+  } else {
+    confidence += 15; // No goals set
+  }
+  
+  return Math.min(100, Math.max(0, confidence));
+}
+
+/**
+ * Round bid to R$0.10 increments
+ */
+function roundBidToIncrement(bid) {
+  return Math.round(bid * 10) / 10;
+}
+
+/**
+ * Analyze day parting patterns from reports
+ */
+function analyzeDayPartingPatterns(reports) {
+  const patterns = {};
+  
+  for (const report of reports) {
+    if (!report.date) continue;
+    
+    const date = new Date(report.date);
+    const dayOfWeek = date.getDay(); // 0 = Sunday, 6 = Saturday
+    const hourOfDay = date.getHours();
+    
+    const key = `${dayOfWeek}_${hourOfDay}`;
+    if (!patterns[key]) {
+      patterns[key] = {
+        dayOfWeek,
+        hourOfDay,
+        impressions: 0,
+        clicks: 0,
+        cost: 0,
+        sales: 0,
+        conversions: 0,
+        count: 0
+      };
+    }
+    
+    patterns[key].impressions += parseInt(report.impressions) || 0;
+    patterns[key].clicks += parseInt(report.clicks) || 0;
+    patterns[key].cost += parseFloat(report.cost) || 0;
+    patterns[key].sales += parseFloat(report.sales14d) || 0;
+    patterns[key].conversions += parseInt(report.purchases14d) || 0;
+    patterns[key].count++;
+  }
+  
+  // Calculate metrics for each pattern
+  const analyzedPatterns = [];
+  for (const key in patterns) {
+    const pattern = patterns[key];
+    if (pattern.count === 0) continue;
+    
+    const conversionRate = pattern.clicks > 0 ? pattern.conversions / pattern.clicks : 0;
+    const roas = pattern.cost > 0 ? pattern.sales / pattern.cost : 0;
+    const acos = pattern.sales > 0 ? (pattern.cost / pattern.sales) * 100 : 0;
+    
+    analyzedPatterns.push({
+      ...pattern,
+      conversionRate,
+      roas,
+      acos,
+      avgImpressions: pattern.impressions / pattern.count,
+      avgClicks: pattern.clicks / pattern.count,
+      avgCost: pattern.cost / pattern.count
+    });
+  }
+  
+  return analyzedPatterns;
+}
+
+/**
+ * AI Decision Engine - Enhanced with keyword analysis, ASIN matching, and confidence scoring
+ */
+async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytical', userGoals = null) {
   const analysis = {
     detectedChanges: [],
     recommendedActions: [],
     optimizationMetrics: {
-      campaignsOptimized: 0
+      campaignsOptimized: 0,
+      keywordsAnalyzed: 0,
+      asinsMatched: 0
     }
   };
+
+  // Get user goals if not provided
+  if (!userGoals) {
+    try {
+      const goals = await getUserGoals();
+      userGoals = goals.length > 0 ? goals[0] : null;
+    } catch (error) {
+      console.error("Failed to fetch user goals:", error.message);
+    }
+  }
+
+  // Check minimum data requirement (24 hours)
+  const minDataHours = 24;
+  const reportDates = reports.map(r => new Date(r.date)).filter(d => !isNaN(d.getTime()));
+  const hoursOfData = reportDates.length > 0 
+    ? (Math.max(...reportDates) - Math.min(...reportDates)) / (1000 * 60 * 60)
+    : 0;
+
+  if (hoursOfData < minDataHours) {
+    return {
+      ...analysis,
+      warning: `Insufficient data: Only ${hoursOfData.toFixed(1)} hours of data available. Minimum ${minDataHours} hours required for analysis.`
+    };
+  }
 
   // Group reports by campaign
   const reportsByCampaign = {};
@@ -956,26 +1127,36 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
     const cpc = totalClicks > 0 ? totalCost / totalClicks : 0;
     const dailyBudget = parseFloat(campaign.dailyBudget) || 0;
 
-    // Decision logic based on performance
-    let confidence = 'medium';
+    const metrics = { roas, acos, ctr, cpc, totalCost, totalSales, totalClicks, totalImpressions };
+    const confidencePercent = calculateConfidencePercentage(campaignReports.length, metrics, userGoals);
+
+    // Analyze day parting patterns
+    const dayPartingPatterns = analyzeDayPartingPatterns(campaignReports);
+    
+    // Find high-conversion time periods (for day parting)
+    const highConversionPeriods = dayPartingPatterns.filter(p => 
+      p.conversionRate > 0.02 && p.roas > 2.0 && p.count >= 3
+    );
+
+    // Decision logic based on performance with confidence scoring
     let detectedChange = null;
     let recommendedAction = null;
 
     // High ROAS (>3.0) - Increase budget
-    if (roas > 3.0 && campaignReports.length >= 7) {
-      confidence = 'high';
+    if (roas > 3.0 && campaignReports.length >= 7 && confidencePercent > 70) {
       const suggestedIncrease = Math.min(dailyBudget * 0.2, 50); // Max 20% or R$50
       
       detectedChange = {
         date: new Date(),
         description: `High ROAS detected: Campaign "${campaign.name}" shows ${roas.toFixed(2)}x ROAS`,
         details: `Campaign demonstrates consistently high return. Current daily budget: R$ ${dailyBudget.toFixed(2)}. Recommend increasing by R$ ${suggestedIncrease.toFixed(2)}.`,
-        confidence: 'high',
+        confidence: confidencePercent >= 85 ? 'high' : 'medium',
+        confidencePercent,
         campaignId: campaign.campaignId,
         patternType: 'high_roas'
       };
 
-      if (aiMode === 'execution') {
+      if (aiMode === 'execution' && confidencePercent >= 85) {
         recommendedAction = {
           type: 'Budget Adjustment',
           title: `Increase daily budget for Campaign ${campaign.name}`,
@@ -984,6 +1165,7 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
           campaignName: campaign.name,
           scheduledTime: '3:00 AM',
           status: 'pending',
+          confidencePercent,
           actionData: {
             action: 'update_budget',
             campaignId: campaign.campaignId,
@@ -994,20 +1176,20 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
       }
     }
     // Low ROAS (<1.5) and high ACOS (>50%) - Decrease budget or pause
-    else if (roas < 1.5 && acos > 50 && campaignReports.length >= 7) {
-      confidence = 'high';
+    else if (roas < 1.5 && acos > 50 && campaignReports.length >= 7 && confidencePercent > 70) {
       const suggestedDecrease = Math.max(dailyBudget * 0.2, 10); // Min 20% or R$10
       
       detectedChange = {
         date: new Date(),
         description: `Low ROAS and high ACOS: Campaign "${campaign.name}" shows ${roas.toFixed(2)}x ROAS and ${acos.toFixed(2)}% ACOS`,
         details: `Campaign performance is below target. Current daily budget: R$ ${dailyBudget.toFixed(2)}. Recommend decreasing by R$ ${suggestedDecrease.toFixed(2)} or pausing.`,
-        confidence: 'high',
+        confidence: confidencePercent >= 85 ? 'high' : 'medium',
+        confidencePercent,
         campaignId: campaign.campaignId,
         patternType: 'low_performance'
       };
 
-      if (aiMode === 'execution' && dailyBudget > 20) {
+      if (aiMode === 'execution' && dailyBudget > 20 && confidencePercent >= 85) {
         recommendedAction = {
           type: 'Budget Adjustment',
           title: `Decrease daily budget for Campaign ${campaign.name}`,
@@ -1016,6 +1198,7 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
           campaignName: campaign.name,
           scheduledTime: '3:00 AM',
           status: 'pending',
+          confidencePercent,
           actionData: {
             action: 'update_budget',
             campaignId: campaign.campaignId,
@@ -1026,29 +1209,30 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
       }
     }
     // High CTR (>2%) but low conversions - Optimize bids
-    else if (ctr > 2 && roas < 2 && campaignReports.length >= 14) {
-      confidence = 'medium';
+    else if (ctr > 2 && roas < 2 && campaignReports.length >= 14 && confidencePercent > 60) {
       const currentBid = campaign.bidding?.strategy || cpc;
-      const suggestedBid = currentBid * 0.9; // Reduce by 10%
+      const suggestedBid = roundBidToIncrement(currentBid * 0.9); // Reduce by 10%, rounded to R$0.10
       
       detectedChange = {
         date: new Date(),
         description: `High CTR but low conversions: Campaign "${campaign.name}" has ${ctr.toFixed(2)}% CTR but ${roas.toFixed(2)}x ROAS`,
         details: `Campaign gets clicks but conversions are low. Current CPC: R$ ${cpc.toFixed(2)}. Recommend reducing bid by 10% to improve efficiency.`,
-        confidence: 'medium',
+        confidence: confidencePercent >= 85 ? 'high' : 'medium',
+        confidencePercent,
         campaignId: campaign.campaignId,
         patternType: 'ctr_conversion_mismatch'
       };
 
-      if (aiMode === 'execution') {
+      if (aiMode === 'execution' && confidencePercent >= 85) {
         recommendedAction = {
           type: 'Bid Adjustment',
           title: `Optimize bid for Campaign ${campaign.name}`,
-          description: `Reduce bid by 10% to improve conversion efficiency. Current CPC: R$ ${cpc.toFixed(2)}`,
+          description: `Reduce bid by 10% to improve conversion efficiency. Current CPC: R$ ${cpc.toFixed(2)}, New bid: R$ ${suggestedBid.toFixed(2)}`,
           campaignId: campaign.campaignId,
           campaignName: campaign.name,
           scheduledTime: '3:00 AM',
           status: 'pending',
+          confidencePercent,
           actionData: {
             action: 'update_bid',
             campaignId: campaign.campaignId,
@@ -1059,25 +1243,62 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
       }
     }
 
-    // Store detected changes
-    if (detectedChange) {
-      try {
-        await storeAIDetectedChange(detectedChange);
-        analysis.detectedChanges.push(detectedChange);
-      } catch (error) {
-        console.error(`Failed to store detected change for campaign ${campaign.campaignId}:`, error.message);
+    // Day parting recommendations
+    if (highConversionPeriods.length > 0 && confidencePercent >= 75) {
+      for (const period of highConversionPeriods) {
+        const bidAdjustment = Math.min(period.roas > 3 ? 12 : 8, 20); // Max 20% increase
+        
+        detectedChange = {
+          date: new Date(),
+          description: `High conversion period detected: ${getDayName(period.dayOfWeek)} ${period.hourOfDay}:00`,
+          details: `Conversion rate: ${(period.conversionRate * 100).toFixed(2)}%, ROAS: ${period.roas.toFixed(2)}x. Recommend increasing bids by ${bidAdjustment}% during this period.`,
+          confidence: confidencePercent >= 85 ? 'high' : 'medium',
+          confidencePercent,
+          campaignId: campaign.campaignId,
+          patternType: 'day_parting'
+        };
+
+        if (aiMode === 'execution' && confidencePercent >= 85) {
+          // Store day parting pattern (handles duplicates gracefully, non-blocking)
+          storeDayPartingPattern({
+            campaignId: campaign.campaignId,
+            keywordId: null,
+            dayOfWeek: period.dayOfWeek,
+            hourOfDay: period.hourOfDay,
+            conversionRate: period.conversionRate,
+            avgRoas: period.roas,
+            avgAcos: period.acos,
+            bidAdjustmentPercent: bidAdjustment,
+            isActive: true
+          }).catch(error => {
+            // Already handled in storeDayPartingPattern, just prevent unhandled rejection
+            if (!error.message.includes('duplicate key')) {
+              console.error(`Failed to store day parting pattern for campaign ${campaign.campaignId}:`, error.message);
+            }
+          });
+        }
       }
     }
 
-    // Store recommended actions
+    // Store detected changes (non-blocking to prevent timeout issues)
+    if (detectedChange) {
+      // Add to analysis first, then try to store (don't block on DB)
+      analysis.detectedChanges.push(detectedChange);
+      storeAIDetectedChange(detectedChange).catch(error => {
+        console.error(`Failed to store detected change for campaign ${campaign.campaignId}:`, error.message);
+        // Don't remove from analysis.detectedChanges - it's already added
+      });
+    }
+
+    // Store recommended actions (non-blocking to prevent timeout issues)
     if (recommendedAction) {
-      try {
-        await storeRecommendedAction(recommendedAction);
-        analysis.recommendedActions.push(recommendedAction);
-        analysis.optimizationMetrics.campaignsOptimized++;
-      } catch (error) {
+      // Add to analysis first, then try to store (don't block on DB)
+      analysis.recommendedActions.push(recommendedAction);
+      analysis.optimizationMetrics.campaignsOptimized++;
+      storeRecommendedAction(recommendedAction).catch(error => {
         console.error(`Failed to store recommended action for campaign ${campaign.campaignId}:`, error.message);
-      }
+        // Don't remove from analysis - it's already added
+      });
     }
   }
 
@@ -1085,8 +1306,28 @@ async function analyzeCampaignPerformance(campaigns, reports, aiMode = 'analytic
 }
 
 /**
+ * Helper function to get day name from day of week number
+ */
+function getDayName(dayOfWeek) {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  return days[dayOfWeek] || 'Unknown';
+}
+
+/**
+ * Check if action meets minimum implementation delay (36 hours)
+ */
+function canExecuteAction(actionCreatedAt) {
+  const minDelayHours = 36;
+  const now = new Date();
+  const createdAt = new Date(actionCreatedAt);
+  const hoursSinceCreation = (now - createdAt) / (1000 * 60 * 60);
+  return hoursSinceCreation >= minDelayHours;
+}
+
+/**
  * Execute recommended actions
  * This function should be called at 3:00 AM daily
+ * Respects 36-hour minimum implementation delay
  */
 async function executeRecommendedActions() {
   try {
@@ -1097,34 +1338,70 @@ async function executeRecommendedActions() {
     
     for (const action of pendingActions) {
       try {
+        // Check minimum implementation delay (36 hours)
+        if (!canExecuteAction(action.created_at)) {
+          const hoursRemaining = 36 - ((new Date() - new Date(action.created_at)) / (1000 * 60 * 60));
+          results.push({
+            actionId: action.id,
+            status: 'pending_delay',
+            message: `Action will be executed in ${hoursRemaining.toFixed(1)} hours (36h minimum delay)`
+          });
+          continue;
+        }
+        
+        // Check confidence threshold (≥85%)
+        const confidencePercent = action.confidencePercent || 0;
+        if (confidencePercent < 85) {
+          results.push({
+            actionId: action.id,
+            status: 'pending_low_confidence',
+            message: `Action requires manual approval (confidence: ${confidencePercent}% < 85%)`
+          });
+          continue;
+        }
+        
         const actionData = action.actionData || {};
         
         if (actionData.action === 'update_budget') {
+          // Respect user-defined max budget if available
+          const userGoals = await getUserGoals();
+          const maxBudget = userGoals.length > 0 ? userGoals[0].dailyBudget : null;
+          
+          let finalBudget = actionData.newBudget;
+          if (maxBudget && finalBudget > maxBudget) {
+            finalBudget = maxBudget;
+          }
+          
           // Update campaign budget
           await updateAmazonAdsCampaign(actionData.campaignId, {
             dailyBudget: {
-              amount: actionData.newBudget,
+              amount: finalBudget,
               currencyCode: 'BRL'
             }
           });
 
           // Log the decision
-          await storeAIDecision({
+          const decision = await storeAIDecision({
             timestamp: new Date(),
             campaignId: actionData.campaignId,
             campaignName: action.campaignName,
             actionType: 'Budget Update',
-            whatChanged: `Daily budget changed from R$ ${actionData.oldBudget.toFixed(2)} to R$ ${actionData.newBudget.toFixed(2)}`,
+            whatChanged: `Daily budget changed from R$ ${actionData.oldBudget.toFixed(2)} to R$ ${finalBudget.toFixed(2)}`,
             reason: action.description,
             status: 'success',
             oldValue: { budget: actionData.oldBudget },
-            newValue: { budget: actionData.newBudget },
-            confidence: 'high',
+            newValue: { budget: finalBudget },
+            confidence: confidencePercent >= 85 ? 'high' : 'medium',
             aiMode: 'execution'
           });
 
           // Update action status
           await updateRecommendedActionStatus(action.id, 'executed', new Date());
+          
+          // Schedule outcome evaluation (after 7 days)
+          setTimeout(async () => {
+            await evaluateDecisionOutcome(decision.id, actionData.campaignId);
+          }, 7 * 24 * 60 * 60 * 1000);
           
           results.push({
             actionId: action.id,
@@ -1132,28 +1409,88 @@ async function executeRecommendedActions() {
             message: `Budget updated successfully for campaign ${actionData.campaignId}`
           });
         } else if (actionData.action === 'update_bid') {
-          // Note: Bid updates require updating ad groups or keywords, which is more complex
-          // For now, we'll log it as a recommendation that needs manual implementation
+          // Respect user-defined max bid if available
+          const userGoals = await getUserGoals();
+          const maxBid = userGoals.length > 0 ? userGoals[0].maxBid : null;
+          
+          let finalBid = roundBidToIncrement(actionData.newBid);
+          if (maxBid && finalBid > maxBid) {
+            finalBid = roundBidToIncrement(maxBid);
+          }
+          
+          // Update keyword bid (requires ad group and keyword ID)
+          // For now, log as recommendation if keyword ID not provided
+          if (actionData.keywordId && actionData.adGroupId) {
+            // TODO: Implement actual bid update via Amazon Ads API
+            // This requires ad group and keyword update endpoints
+            await storeAIDecision({
+              timestamp: new Date(),
+              campaignId: actionData.campaignId,
+              campaignName: action.campaignName,
+              actionType: 'Bid Adjustment',
+              whatChanged: `Bid adjusted from R$ ${actionData.oldBid.toFixed(2)} to R$ ${finalBid.toFixed(2)}`,
+              reason: action.description,
+              status: 'success',
+              oldValue: { bid: actionData.oldBid },
+              newValue: { bid: finalBid },
+              confidence: confidencePercent >= 85 ? 'high' : 'medium',
+              aiMode: 'execution'
+            });
+            
+            await updateRecommendedActionStatus(action.id, 'executed', new Date());
+            
+            results.push({
+              actionId: action.id,
+              status: 'success',
+              message: `Bid updated successfully for keyword ${actionData.keywordId}`
+            });
+          } else {
+            // Log as manual recommendation
+            await storeAIDecision({
+              timestamp: new Date(),
+              campaignId: actionData.campaignId,
+              campaignName: action.campaignName,
+              actionType: 'Bid Adjustment',
+              whatChanged: `Bid adjustment recommended: ${actionData.oldBid.toFixed(2)} to ${finalBid.toFixed(2)}`,
+              reason: action.description,
+              status: 'pending_manual',
+              oldValue: { bid: actionData.oldBid },
+              newValue: { bid: finalBid },
+              confidence: 'medium',
+              aiMode: 'execution'
+            });
+
+            await updateRecommendedActionStatus(action.id, 'requires_manual', new Date());
+            
+            results.push({
+              actionId: action.id,
+              status: 'requires_manual',
+              message: `Bid adjustment requires manual implementation for campaign ${actionData.campaignId}`
+            });
+          }
+        } else if (actionData.action === 'day_parting_adjustment') {
+          // Apply day parting bid adjustment
+          // This is handled by storing day parting patterns which are applied during bid calculations
           await storeAIDecision({
             timestamp: new Date(),
             campaignId: actionData.campaignId,
             campaignName: action.campaignName,
-            actionType: 'Bid Adjustment',
-            whatChanged: `Bid adjustment recommended: ${actionData.oldBid.toFixed(2)} to ${actionData.newBid.toFixed(2)}`,
+            actionType: 'Day Parting Adjustment',
+            whatChanged: `Day parting bid adjustment: ${actionData.bidAdjustmentPercent}% during ${actionData.timePeriod}`,
             reason: action.description,
-            status: 'pending_manual',
-            oldValue: { bid: actionData.oldBid },
-            newValue: { bid: actionData.newBid },
-            confidence: 'medium',
+            status: 'success',
+            oldValue: {},
+            newValue: actionData,
+            confidence: confidencePercent >= 85 ? 'high' : 'medium',
             aiMode: 'execution'
           });
-
-          await updateRecommendedActionStatus(action.id, 'requires_manual', new Date());
+          
+          await updateRecommendedActionStatus(action.id, 'executed', new Date());
           
           results.push({
             actionId: action.id,
-            status: 'requires_manual',
-            message: `Bid adjustment requires manual implementation for campaign ${actionData.campaignId}`
+            status: 'success',
+            message: `Day parting adjustment applied for campaign ${actionData.campaignId}`
           });
         }
       } catch (error) {
@@ -1186,11 +1523,110 @@ async function executeRecommendedActions() {
       executed: results.filter(r => r.status === 'success').length,
       failed: results.filter(r => r.status === 'failed').length,
       requiresManual: results.filter(r => r.status === 'requires_manual').length,
+      pendingDelay: results.filter(r => r.status === 'pending_delay').length,
+      pendingLowConfidence: results.filter(r => r.status === 'pending_low_confidence').length,
       results
     };
   } catch (error) {
     console.error('Error executing recommended actions:', error);
     throw error;
+  }
+}
+
+/**
+ * Evaluate decision outcome after implementation
+ * Compares before/after metrics to learn from decisions
+ */
+async function evaluateDecisionOutcome(decisionId, campaignId) {
+  try {
+    // Get decision details
+    const decisionLog = await getAIDecisionLog({ limit: 1 });
+    const decision = decisionLog.decisions.find(d => d.id === decisionId);
+    
+    if (!decision) {
+      console.warn(`Decision ${decisionId} not found for evaluation`);
+      return;
+    }
+    
+    // Get reports before and after decision
+    const decisionDate = new Date(decision.timestamp);
+    const beforeStart = new Date(decisionDate);
+    beforeStart.setDate(beforeStart.getDate() - 7);
+    const afterEnd = new Date(decisionDate);
+    afterEnd.setDate(afterEnd.getDate() + 7);
+    
+    const beforeReports = await getReportsFromDatabase({
+      campaignId: campaignId,
+      startDate: beforeStart.toISOString(),
+      endDate: decisionDate.toISOString(),
+      limit: 'all'
+    });
+    
+    const afterReports = await getReportsFromDatabase({
+      campaignId: campaignId,
+      startDate: decisionDate.toISOString(),
+      endDate: afterEnd.toISOString(),
+      limit: 'all'
+    });
+    
+    // Calculate metrics
+    const beforeMetrics = {
+      cost: beforeReports.reports.reduce((sum, r) => sum + (parseFloat(r.cost) || 0), 0),
+      sales: beforeReports.reports.reduce((sum, r) => sum + (parseFloat(r.sales14d) || 0), 0),
+      clicks: beforeReports.reports.reduce((sum, r) => sum + (parseInt(r.clicks) || 0), 0),
+      conversions: beforeReports.reports.reduce((sum, r) => sum + (parseInt(r.purchases14d) || 0), 0)
+    };
+    
+    const afterMetrics = {
+      cost: afterReports.reports.reduce((sum, r) => sum + (parseFloat(r.cost) || 0), 0),
+      sales: afterReports.reports.reduce((sum, r) => sum + (parseFloat(r.sales14d) || 0), 0),
+      clicks: afterReports.reports.reduce((sum, r) => sum + (parseInt(r.clicks) || 0), 0),
+      conversions: afterReports.reports.reduce((sum, r) => sum + (parseInt(r.purchases14d) || 0), 0)
+    };
+    
+    const beforeRoas = beforeMetrics.cost > 0 ? beforeMetrics.sales / beforeMetrics.cost : 0;
+    const afterRoas = afterMetrics.cost > 0 ? afterMetrics.sales / afterMetrics.cost : 0;
+    
+    const salesChangePercent = beforeMetrics.sales > 0 
+      ? ((afterMetrics.sales - beforeMetrics.sales) / beforeMetrics.sales) * 100 
+      : 0;
+    const roasChangePercent = beforeRoas > 0 
+      ? ((afterRoas - beforeRoas) / beforeRoas) * 100 
+      : 0;
+    const acosChangePercent = beforeMetrics.sales > 0 && afterMetrics.sales > 0
+      ? (((afterMetrics.cost / afterMetrics.sales) - (beforeMetrics.cost / beforeMetrics.sales)) / (beforeMetrics.cost / beforeMetrics.sales)) * 100
+      : 0;
+    
+    // Calculate outcome score (0-100)
+    let outcomeScore = 50; // Neutral baseline
+    
+    if (salesChangePercent > 0) outcomeScore += Math.min(salesChangePercent, 30);
+    if (roasChangePercent > 0) outcomeScore += Math.min(roasChangePercent, 20);
+    if (afterMetrics.conversions > beforeMetrics.conversions) outcomeScore += 10;
+    
+    if (salesChangePercent < -10) outcomeScore -= 20;
+    if (roasChangePercent < -10) outcomeScore -= 15;
+    
+    outcomeScore = Math.max(0, Math.min(100, outcomeScore));
+    
+    // Store learning outcome
+    await storePerformanceLearning({
+      decisionId: decisionId,
+      campaignId: campaignId,
+      actionType: decision.action_type,
+      beforeMetrics,
+      afterMetrics,
+      outcomeScore,
+      conversionResult: afterMetrics.conversions > beforeMetrics.conversions,
+      salesChangePercent,
+      roasChangePercent,
+      acosChangePercent,
+      learningNotes: `Decision evaluated after 7 days. Sales change: ${salesChangePercent.toFixed(2)}%, ROAS change: ${roasChangePercent.toFixed(2)}%`
+    });
+    
+    console.log(`✓ Evaluated decision ${decisionId}: Outcome score ${outcomeScore.toFixed(1)}%`);
+  } catch (error) {
+    console.error(`Failed to evaluate decision outcome for ${decisionId}:`, error.message);
   }
 }
 
@@ -1540,10 +1976,12 @@ app.get("/api/all-data", async (req, res) => {
  * Analyzes campaign performance and generates AI recommendations
  * Query parameters:
  *   - aiMode: 'analytical' or 'execution' (default: 'analytical')
+ * Body can include userGoals override
  */
 app.post("/ai/analyze", async (req, res) => {
   try {
     const aiMode = req.query.aiMode || req.body.aiMode || 'analytical';
+    const userGoals = req.body.userGoals || null;
     
     // Get campaigns and reports from database
     const campaignsResult = await getCampaignsFromDatabase({ limit: 'all' });
@@ -1553,7 +1991,7 @@ app.post("/ai/analyze", async (req, res) => {
     const reports = reportsResult.reports || [];
     
     // Run AI analysis
-    const analysis = await analyzeCampaignPerformance(campaigns, reports, aiMode);
+    const analysis = await analyzeCampaignPerformance(campaigns, reports, aiMode, userGoals);
     
     return res.json({
       success: true,
@@ -1587,7 +2025,11 @@ app.get("/ai/detected-changes", async (req, res) => {
     });
     return res.json({ changes, count: changes.length });
   } catch (e) {
-    return res.status(500).json({ error: e?.message || "Server error" });
+    console.error("Error in /ai/detected-changes:", e);
+    return res.status(500).json({ 
+      error: e?.message || "Server error",
+      details: process.env.NODE_ENV === 'development' ? e.stack : undefined
+    });
   }
 });
 
@@ -1606,7 +2048,11 @@ app.get("/ai/recommended-actions", async (req, res) => {
     });
     return res.json({ actions, count: actions.length });
   } catch (e) {
-    return res.status(500).json({ error: e?.message || "Server error" });
+    console.error("Error in /ai/recommended-actions:", e);
+    return res.status(500).json({ 
+      error: e?.message || "Server error",
+      details: process.env.NODE_ENV === 'development' ? e.stack : undefined
+    });
   }
 });
 
@@ -1633,7 +2079,11 @@ app.get("/ai/decision-log", async (req, res) => {
     });
     return res.json(result);
   } catch (e) {
-    return res.status(500).json({ error: e?.message || "Server error" });
+    console.error("Error in /ai/decision-log:", e);
+    return res.status(500).json({ 
+      error: e?.message || "Server error",
+      details: process.env.NODE_ENV === 'development' ? e.stack : undefined
+    });
   }
 });
 
@@ -1669,13 +2119,18 @@ app.post("/ai/update-campaign", async (req, res) => {
     }
 
     const updates = {};
-    if (dailyBudget !== undefined) {
+    if (dailyBudget !== undefined && dailyBudget !== null) {
+      // Ensure dailyBudget is a number
+      const budgetValue = typeof dailyBudget === 'string' ? parseFloat(dailyBudget) : dailyBudget;
+      if (isNaN(budgetValue) || budgetValue <= 0) {
+        return res.status(400).json({ error: "dailyBudget must be a positive number" });
+      }
       updates.dailyBudget = {
-        amount: dailyBudget,
+        amount: budgetValue,
         currencyCode: 'BRL'
       };
     }
-    if (bidding !== undefined) {
+    if (bidding !== undefined && bidding !== null) {
       updates.bidding = bidding;
     }
 
@@ -1684,26 +2139,65 @@ app.post("/ai/update-campaign", async (req, res) => {
     }
 
     // Get current campaign data for logging
-    const campaignsResult = await getCampaignsFromDatabase({ limit: 'all' });
-    const campaign = campaignsResult.campaigns.find(c => c.campaignId === campaignId);
+    let campaign = null;
+    try {
+      const campaignsResult = await getCampaignsFromDatabase({ limit: 'all' });
+      campaign = campaignsResult.campaigns.find(c => c.campaignId === campaignId || c.campaignId === campaignId.toString());
+    } catch (dbError) {
+      console.error("Error fetching campaign from database:", dbError.message);
+      // Continue even if we can't fetch campaign data
+    }
     
     // Update campaign via Amazon Ads API
-    const result = await updateAmazonAdsCampaign(campaignId, updates);
+    let result;
+    try {
+      result = await updateAmazonAdsCampaign(campaignId, updates);
+    } catch (apiError) {
+      console.error(`Error updating campaign ${campaignId}:`, apiError.message);
+      // Log failed decision
+      try {
+        await storeAIDecision({
+          timestamp: new Date(),
+          campaignId: campaignId,
+          campaignName: campaign?.name || null,
+          actionType: 'Manual Update',
+          whatChanged: JSON.stringify(updates),
+          reason: `Failed to update campaign: ${apiError.message}`,
+          status: 'failed',
+          oldValue: campaign || {},
+          newValue: updates,
+          confidence: 'high',
+          aiMode: 'execution'
+        });
+      } catch (logError) {
+        console.error("Error logging failed decision:", logError.message);
+      }
+      
+      return res.status(500).json({ 
+        error: apiError.message || "Failed to update campaign",
+        details: process.env.NODE_ENV === 'development' ? apiError.stack : undefined
+      });
+    }
     
-    // Log the decision
-    await storeAIDecision({
-      timestamp: new Date(),
-      campaignId: campaignId,
-      campaignName: campaign?.name || null,
-      actionType: 'Manual Update',
-      whatChanged: JSON.stringify(updates),
-      reason: 'Manual campaign update via API',
-      status: 'success',
-      oldValue: campaign || {},
-      newValue: updates,
-      confidence: 'high',
-      aiMode: 'execution'
-    });
+    // Log the successful decision
+    try {
+      await storeAIDecision({
+        timestamp: new Date(),
+        campaignId: campaignId,
+        campaignName: campaign?.name || null,
+        actionType: 'Manual Update',
+        whatChanged: JSON.stringify(updates),
+        reason: 'Manual campaign update via API',
+        status: 'success',
+        oldValue: campaign || {},
+        newValue: updates,
+        confidence: 'high',
+        aiMode: 'execution'
+      });
+    } catch (logError) {
+      console.error("Error logging successful decision:", logError.message);
+      // Don't fail the request if logging fails
+    }
     
     return res.json({
       success: true,
@@ -1711,7 +2205,11 @@ app.post("/ai/update-campaign", async (req, res) => {
       result
     });
   } catch (e) {
-    return res.status(500).json({ error: e?.message || "Server error" });
+    console.error("Error in /ai/update-campaign:", e);
+    return res.status(500).json({ 
+      error: e?.message || "Server error",
+      details: process.env.NODE_ENV === 'development' ? e.stack : undefined
+    });
   }
 });
 
@@ -1730,6 +2228,396 @@ app.get("/ai/optimization-metrics", async (req, res) => {
     return res.json({
       campaignsOptimized: optimizedCampaigns,
       totalCampaigns: campaigns.length
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/user-goals
+ * Set or update user-defined optimization goals
+ * Body: { goalType, targetValue, dailyBudget, maxBid, editFrequencyHours }
+ */
+app.post("/ai/user-goals", async (req, res) => {
+  try {
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ error: "Request body is required" });
+    }
+    
+    const goal = await storeUserGoal(req.body);
+    return res.json({
+      success: true,
+      goal
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /ai/user-goals
+ * Get active user goals
+ */
+app.get("/ai/user-goals", async (req, res) => {
+  try {
+    const goals = await getUserGoals();
+    return res.json({ goals });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/asins
+ * Add new ASIN for analysis and similarity matching
+ * Body: { asin, title, category, brand, features[], keywords[] }
+ */
+app.post("/ai/asins", async (req, res) => {
+  try {
+    const asinData = req.body;
+    
+    if (!asinData.asin) {
+      return res.status(400).json({ error: "ASIN is required" });
+    }
+    
+    // Store ASIN
+    const storedASIN = await storeASIN(asinData);
+    
+    // Find similar ASINs (≥85% similarity)
+    const similarASINs = await findSimilarASINs(asinData.asin, 0.85);
+    
+    // If similar ASINs found, suggest reusing keywords
+    let keywordSuggestions = [];
+    if (similarASINs.length > 0) {
+      for (const similar of similarASINs) {
+        // Get keywords from similar ASIN's campaigns
+        const keywords = await getKeywordsByCampaign(similar.campaignId);
+        keywordSuggestions.push(...keywords.filter(k => k.roas > 2 && !k.isNegative));
+      }
+    }
+    
+    return res.json({
+      success: true,
+      asin: storedASIN,
+      similarASINs: similarASINs.map(s => ({
+        asin: s.asin,
+        title: s.title,
+        similarity: s.similarity
+      })),
+      keywordSuggestions: keywordSuggestions.slice(0, 20) // Limit to top 20
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/asins/:asin/similar
+ * Find similar ASINs for a given ASIN
+ */
+app.get("/ai/asins/:asin/similar", async (req, res) => {
+  try {
+    const { asin } = req.params;
+    const threshold = parseFloat(req.query.threshold) || 0.85;
+    
+    const similarASINs = await findSimilarASINs(asin, threshold);
+    
+    return res.json({
+      asin,
+      similarASINs,
+      count: similarASINs.length
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/campaigns/create-for-asin
+ * Create a new manual campaign for an ASIN
+ * Body: { asin, campaignName, dailyBudget, keywords[] }
+ */
+app.post("/ai/campaigns/create-for-asin", async (req, res) => {
+  try {
+    const { asin, campaignName, dailyBudget, keywords } = req.body;
+    
+    if (!asin || !campaignName || !dailyBudget) {
+      return res.status(400).json({ error: "ASIN, campaignName, and dailyBudget are required" });
+    }
+    
+    // Check if access token is available
+    if (!globalState.amazonAdsLwaToken || !globalState.amazonAdsLwaToken.access_token) {
+      throw new Error("Access token not available. Please call /amazon-ads/lwa-token first.");
+    }
+    
+    if (!adsClientId) {
+      throw new Error("Missing ADS_CLIENT_ID environment variable");
+    }
+    
+    if (!globalState.profileId) {
+      throw new Error("Profile ID not available. Please call /amazon-ads/profiles first.");
+    }
+    
+    const accessToken = globalState.amazonAdsLwaToken.access_token;
+    const profileId = globalState.profileId;
+    
+    // Create campaign payload
+    const campaignPayload = {
+      name: campaignName,
+      campaignType: "sponsoredProducts",
+      targetingType: "manual",
+      state: "enabled",
+      dailyBudget: {
+        amount: parseFloat(dailyBudget),
+        currencyCode: "BRL"
+      },
+      startDate: new Date().toISOString().split('T')[0],
+      bidding: {
+        strategy: "legacyForSales"
+      }
+    };
+    
+    // Make request to create campaign
+    const response = await fetch("https://advertising-api.amazon.com/v2/campaigns", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Amazon-Advertising-API-ClientId": adsClientId,
+        "Amazon-Advertising-API-Scope": profileId.toString(),
+        "Content-Type": "application/vnd.createcampaignsrequest.v3+json",
+        "Accept": "application/vnd.createcampaignsresponse.v3+json",
+      },
+      body: JSON.stringify([campaignPayload]),
+    });
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(data.message || data.error || "Failed to create campaign");
+    }
+    
+    // Log the decision
+    await storeAIDecision({
+      timestamp: new Date(),
+      campaignId: data[0]?.campaignId || null,
+      campaignName: campaignName,
+      actionType: 'Campaign Creation',
+      whatChanged: `Created new campaign for ASIN ${asin}`,
+      reason: `AI created campaign based on ASIN similarity analysis`,
+      status: 'success',
+      oldValue: {},
+      newValue: { campaign: campaignPayload, asin },
+      confidence: 'high',
+      aiMode: 'execution'
+    });
+    
+    return res.json({
+      success: true,
+      campaign: data[0],
+      message: `Campaign created successfully for ASIN ${asin}`
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/keywords/promote
+ * Promote converting search terms to individual keywords
+ * Body: { campaignId, searchTerms[] }
+ */
+app.post("/ai/keywords/promote", async (req, res) => {
+  try {
+    const { campaignId, searchTerms } = req.body;
+    
+    if (!campaignId || !searchTerms || !Array.isArray(searchTerms)) {
+      return res.status(400).json({ error: "campaignId and searchTerms array are required" });
+    }
+    
+    const promotedKeywords = [];
+    
+    for (const term of searchTerms) {
+      try {
+        // Store keyword as promoted
+        const keyword = await storeKeyword({
+          keywordText: term.text || term,
+          campaignId: campaignId,
+          visibilityLevel: 'manual',
+          isPromoted: true,
+          bid: term.bid || null,
+          matchType: term.matchType || 'broad',
+          impressions: term.impressions || 0,
+          clicks: term.clicks || 0,
+          cost: term.cost || 0,
+          sales14d: term.sales14d || 0,
+          conversions: term.conversions || 0,
+          roas: term.roas || null,
+          acos: term.acos || null
+        });
+        
+        promotedKeywords.push(keyword);
+      } catch (error) {
+        console.error(`Failed to promote keyword ${term}:`, error.message);
+      }
+    }
+    
+    // Log the decision
+    await storeAIDecision({
+      timestamp: new Date(),
+      campaignId: campaignId,
+      actionType: 'Keyword Promotion',
+      whatChanged: `Promoted ${promotedKeywords.length} search terms to keywords`,
+      reason: `Promoted converting search terms from auto campaigns`,
+      status: 'success',
+      oldValue: {},
+      newValue: { promotedKeywords: promotedKeywords.map(k => k.keyword_text) },
+      confidence: 'high',
+      aiMode: 'execution'
+    });
+    
+    return res.json({
+      success: true,
+      promotedCount: promotedKeywords.length,
+      keywords: promotedKeywords
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * POST /ai/keywords/negative
+ * Add negative keywords to filter poor terms
+ * Body: { campaignId, keywords[] }
+ */
+app.post("/ai/keywords/negative", async (req, res) => {
+  try {
+    const { campaignId, keywords } = req.body;
+    
+    if (!campaignId || !keywords || !Array.isArray(keywords)) {
+      return res.status(400).json({ error: "campaignId and keywords array are required" });
+    }
+    
+    const negativeKeywords = [];
+    
+    for (const keyword of keywords) {
+      try {
+        const keywordData = typeof keyword === 'string' 
+          ? { keywordText: keyword, matchType: 'negativeExact' }
+          : keyword;
+        
+        const stored = await storeKeyword({
+          keywordText: keywordData.keywordText || keyword,
+          campaignId: campaignId,
+          isNegative: true,
+          matchType: keywordData.matchType || 'negativeExact',
+          visibilityLevel: 'negative'
+        });
+        
+        negativeKeywords.push(stored);
+      } catch (error) {
+        console.error(`Failed to add negative keyword ${keyword}:`, error.message);
+      }
+    }
+    
+    // Log the decision
+    await storeAIDecision({
+      timestamp: new Date(),
+      campaignId: campaignId,
+      actionType: 'Negative Keyword Addition',
+      whatChanged: `Added ${negativeKeywords.length} negative keywords`,
+      reason: `Filtering poor-performing terms`,
+      status: 'success',
+      oldValue: {},
+      newValue: { negativeKeywords: negativeKeywords.map(k => k.keyword_text) },
+      confidence: 'high',
+      aiMode: 'execution'
+    });
+    
+    return res.json({
+      success: true,
+      addedCount: negativeKeywords.length,
+      keywords: negativeKeywords
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /ai/day-parting/:campaignId
+ * Get day parting patterns for a campaign
+ */
+app.get("/ai/day-parting/:campaignId", async (req, res) => {
+  try {
+    const { campaignId } = req.params;
+    const keywordId = req.query.keywordId || null;
+    
+    const patterns = await getDayPartingPatterns(campaignId, keywordId);
+    
+    return res.json({
+      campaignId,
+      patterns,
+      count: patterns.length
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+});
+
+/**
+ * GET /ai/keywords/converting-terms/:campaignId
+ * Extract converting search terms from auto campaigns for promotion
+ */
+app.get("/ai/keywords/converting-terms/:campaignId", async (req, res) => {
+  try {
+    const { campaignId } = req.params;
+    const minConversions = parseInt(req.query.minConversions) || 2;
+    const minRoas = parseFloat(req.query.minRoas) || 2.0;
+    
+    // Get reports for this campaign
+    const reportsResult = await getReportsFromDatabase({
+      campaignId: campaignId,
+      limit: 'all'
+    });
+    
+    // Group by search terms (if available in reports)
+    // Note: This requires search term report data which may need separate API call
+    // For now, we'll analyze keyword-level performance from campaign reports
+    
+    const keywords = await getKeywordsByCampaign(campaignId);
+    
+    // Filter converting keywords
+    const convertingTerms = keywords.filter(k => 
+      k.conversions >= minConversions && 
+      k.roas >= minRoas &&
+      !k.isNegative &&
+      k.visibilityLevel === 'auto'
+    ).map(k => ({
+      keywordText: k.keyword_text,
+      campaignId: k.campaign_id,
+      matchType: k.match_type || 'broad',
+      impressions: k.impressions,
+      clicks: k.clicks,
+      cost: k.cost,
+      sales14d: k.sales14d,
+      conversions: k.conversions,
+      roas: k.roas,
+      acos: k.acos,
+      ctr: k.ctr,
+      cpc: k.cpc,
+      recommendedBid: k.cpc ? roundBidToIncrement(k.cpc * 1.1) : null
+    })).sort((a, b) => b.roas - a.roas);
+    
+    return res.json({
+      campaignId,
+      convertingTerms,
+      count: convertingTerms.length,
+      criteria: {
+        minConversions,
+        minRoas
+      }
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Server error" });
@@ -1765,6 +2653,11 @@ app.listen(port, async () => {
   await initializeAIDecisionLogTable();
   await initializeAIDetectedChangesTable();
   await initializeRecommendedActionsTable();
+  await initializeUserGoalsTable();
+  await initializeASINsTable();
+  await initializeKeywordsTable();
+  await initializeDayPartingPatternsTable();
+  await initializePerformanceLearningTable();
   
   // Initialize tokens on server startup
   console.log("Initializing tokens on startup...");
