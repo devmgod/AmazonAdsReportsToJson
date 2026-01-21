@@ -63,7 +63,7 @@ const globalState = {
   amazonLwaToken: null,
   amazonAdsLwaToken: null,
   profileId: null,
-  reportId: "1304720d-9481-4161-912d-2c9086b0082e",
+  reportId: "",
   url: null,
   revenue: null,
 };
